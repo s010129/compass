@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v6';
+const BUILD = 'v7';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -146,6 +146,9 @@ const els = {
   controlsOpts: $('controlsOpts'),
   chartPanel: $('chartPanel'),
   sensorBar: $('sensorBar'),
+  controlsTest: $('controlsTest'),
+  btnFull: $('btnFull'),
+  btnOrigin: $('btnOrigin'),
   lgRaw: $('lgRaw'),
 };
 
@@ -709,73 +712,195 @@ function labelAt(ctx, x, y, text, color, w, h) {
 // ---------------------------------------------------------------- 座標測試
 
 /**
- * 座標測試畫面：十字鍵移動一顆燈，顯示目前座標。
+ * 座標測試畫面：整個畫面的原始像素座標。
  *
- * 燈的位置是「裝置座標」，而且走的是和紅綠箭頭完全同一條轉換路徑
- * （toScreen + canvas 的 y 翻轉），所以按「上」燈往螢幕上方跑，就代表
- * 那條路徑沒有顛倒。橫放時 screen.orientation.angle 的補償也一起驗證到。
+ * 原點 (0, 0) 在畫面左上角，和瀏覽器的 clientX / clientY 完全一致。
+ * 點畫面任何一處燈就跳過去，十字鍵一格一格微調（按住會加速）。
+ *
+ * 除了原始像素，同時顯示「裝置座標」—— 也就是紅綠箭頭真正用的那個座標系
+ * （原點在中心、+y 朝螢幕上方、已用 screen.orientation.angle 補償）。
+ * 兩組數字並排，轉換有沒有顛倒一眼就看得出來。
  */
-const TEST_LIMIT = 3;               // 座標範圍 ±3
-const test = { x: 0, y: 0, hits: null, flash: 0 };
+const test = {
+  x: 0, y: 0,          // 原始 CSS 像素，原點在左上角
+  w: 0, h: 0,          // 畫布的 CSS 尺寸
+  hits: null,
+  flash: 0,
+  fs: false,           // 是否在全螢幕
+  held: null,
+  heldAt: 0,
+  timer: null,
+};
 if (typeof window !== 'undefined') window.__test = test;
 
-function testMove(dx, dy) {
-  const nx = Math.min(TEST_LIMIT, Math.max(-TEST_LIMIT, test.x + dx));
-  const ny = Math.min(TEST_LIMIT, Math.max(-TEST_LIMIT, test.y + dy));
-  if (nx === test.x && ny === test.y) return;   // 撞到邊界
-  test.x = nx;
-  test.y = ny;
+/** 螢幕座標 → 裝置座標：toScreen 的反向，繞 z 轉 +θ。 */
+function fromScreen(v) {
+  const angle = (screen.orientation?.angle ?? window.orientation ?? 0) * DEG;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { x: v.x * c - v.y * s, y: v.x * s + v.y * c };
+}
+
+function testSetPos(x, y) {
+  test.x = Math.round(Math.min(Math.max(x, 0), Math.max(0, test.w - 1)));
+  test.y = Math.round(Math.min(Math.max(y, 0), Math.max(0, test.h - 1)));
   test.flash = performance.now();
-  if (navigator.vibrate) { try { navigator.vibrate(8); } catch { /* 略 */ } }
+}
+
+/** 按住越久步進越大：先 1 px，0.6 秒後 5 px，1.5 秒後 20 px。 */
+function testStep() {
+  const held = performance.now() - test.heldAt;
+  if (held > 1500) return 20;
+  if (held > 600) return 5;
+  return 1;
+}
+
+function testNudge(dir) {
+  const s = testStep();
+  const d = { up: [0, -s], down: [0, s], left: [-s, 0], right: [s, 0] }[dir];
+  if (!d) return;
+  testSetPos(test.x + d[0], test.y + d[1]);
+  if (navigator.vibrate) { try { navigator.vibrate(4); } catch { /* 略 */ } }
+}
+
+function testStopHold() {
+  if (test.timer !== null) {
+    clearTimeout(test.timer);
+    clearInterval(test.timer);
+    test.timer = null;
+  }
+  test.held = null;
+}
+
+function testHold(dir) {
+  testStopHold();
+  test.held = dir;
+  test.heldAt = performance.now();
+  testNudge(dir);
+  // 先等 300 ms 再開始連發，這樣輕點只會走一格
+  test.timer = setTimeout(() => {
+    test.timer = setInterval(() => { if (test.held) testNudge(test.held); }, 70);
+  }, 300);
+}
+
+/**
+ * 全螢幕。iPhone 的 Safari 沒有 Fullscreen API（只有 iPad 有），
+ * 所以先套 CSS 的滿版覆蓋，再「盡量」呼叫 Fullscreen API；
+ * 失敗也還是滿版，只是上面會留系統列。
+ */
+async function toggleTestFullscreen() {
+  if (test.fs) {
+    test.fs = false;
+    document.body.classList.remove('fs-test');
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      try { await (document.exitFullscreen?.() ?? document.webkitExitFullscreen?.()); }
+      catch { /* 略 */ }
+    }
+    return;
+  }
+  test.fs = true;
+  document.body.classList.add('fs-test');
+  const el = document.documentElement;
+  const req = el.requestFullscreen ?? el.webkitRequestFullscreen;
+  if (req) { try { await req.call(el); } catch { /* 沒有就算了 */ } }
+}
+
+// 使用者按 Esc 離開時把狀態同步回來
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
+  document.addEventListener(ev, () => {
+    const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (!on && test.fs) {
+      test.fs = false;
+      document.body.classList.remove('fs-test');
+    }
+  });
 }
 
 function drawTestView() {
   const { ctx, w, h } = fitCanvas(els.view);
-  const TOP = 54;                      // 上方留給座標讀數
-  const BOTTOM = 22;                   // 下方留給螢幕方向
-  const size = Math.min(w, h - TOP - BOTTOM);
+  test.w = w;
+  test.h = h;
   const cx = w / 2;
-  const cy = TOP + (h - TOP - BOTTOM) / 2;
-  const pitch = size / (TEST_LIMIT * 2 + 3);
+  const cy = h / 2;
 
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = '#0b0d12';
   ctx.fillRect(0, 0, w, h);
 
-  // 裝置座標 → canvas。和箭頭用同一條路徑。
-  const place = (gx, gy) => {
-    const s = toScreen({ x: gx, y: gy });
-    return { px: cx + s.x * pitch, py: cy - s.y * pitch };
-  };
-
-  // 軸線
-  const ax = toScreen({ x: 1, y: 0 });
-  const ay = toScreen({ x: 0, y: 1 });
-  const reach = (TEST_LIMIT + 0.7) * pitch;
-  ctx.strokeStyle = '#1c2231';
+  // 每 50 px 一條細線、每 100 px 一條亮線並標數字
+  ctx.save();
+  ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = '#39405a';
   ctx.lineWidth = 1;
-  for (const v of [ax, ay]) {
+  for (let x = 0; x <= w; x += 50) {
+    const major = x % 100 === 0;
+    ctx.strokeStyle = major ? '#20273a' : '#161b28';
     ctx.beginPath();
-    ctx.moveTo(cx - v.x * reach, cy + v.y * reach);
-    ctx.lineTo(cx + v.x * reach, cy - v.y * reach);
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, h);
     ctx.stroke();
+    if (major && x > 0) {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(x), x + 3, 3);
+    }
   }
+  for (let y = 0; y <= h; y += 50) {
+    const major = y % 100 === 0;
+    ctx.strokeStyle = major ? '#20273a' : '#161b28';
+    ctx.beginPath();
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(w, y + 0.5);
+    ctx.stroke();
+    if (major && y > 0) {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(y), 3, y + 3);
+    }
+  }
+  ctx.restore();
 
-  // 十字鍵（畫在燈的下層，所以燈永遠看得見）。
-  // 按鈕大小不跟著格點縮，並保底 44 CSS px 的觸控範圍。
-  const b = Math.max(44, size * 0.15);
+  // 畫面中心：裝置座標的原點
+  ctx.save();
+  ctx.strokeStyle = 'rgba(90,169,255,.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 9, 0, TWO_PI);
+  ctx.stroke();
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(90,169,255,.6)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('中心', cx, cy + 12);
+  ctx.restore();
+
+  // 通過燈的十字準線，方便讀座標
+  ctx.save();
+  ctx.setLineDash([3, 4]);
+  ctx.strokeStyle = 'rgba(255,201,60,.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, test.y + 0.5);
+  ctx.lineTo(w, test.y + 0.5);
+  ctx.moveTo(test.x + 0.5, 0);
+  ctx.lineTo(test.x + 0.5, h);
+  ctx.stroke();
+  ctx.restore();
+
+  // 十字鍵（畫在燈的下層，燈才不會被遮住）。保底 44 CSS px 觸控範圍。
+  const b = Math.max(44, Math.min(w, h) * 0.12);
   const mk = (ox, oy) => ({ x: cx + ox - b / 2, y: cy + oy - b / 2, w: b, h: b });
   test.hits = {
-    up: mk(0, -b), down: mk(0, b), left: mk(-b, 0), right: mk(b, 0),
-    center: mk(0, 0),
+    up: mk(0, -b), down: mk(0, b), left: mk(-b, 0), right: mk(b, 0), center: mk(0, 0),
+    exit: test.fs ? { x: w - 56, y: 8, w: 48, h: 44 } : null,
   };
   ctx.save();
-  ctx.strokeStyle = 'rgba(148,157,176,.38)';
-  ctx.fillStyle = 'rgba(148,157,176,.32)';
+  ctx.strokeStyle = 'rgba(148,157,176,.4)';
+  ctx.fillStyle = 'rgba(148,157,176,.34)';
   ctx.lineWidth = 1.5;
-  ctx.font = `${Math.round(b * 0.42)}px system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.font = `${Math.round(b * 0.4)}px system-ui, sans-serif`;
   for (const [key, glyph] of [['up', '▲'], ['down', '▼'], ['left', '◀'], ['right', '▶']]) {
     const r = test.hits[key];
     ctx.beginPath();
@@ -783,60 +908,91 @@ function drawTestView() {
     ctx.stroke();
     ctx.fillText(glyph, r.x + r.w / 2, r.y + r.h / 2);
   }
-  ctx.font = `${Math.round(b * 0.26)}px system-ui, sans-serif`;
-  ctx.fillStyle = 'rgba(148,157,176,.28)';
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(148,157,176,.3)';
   ctx.fillText('歸零', cx, cy);
+  if (test.hits.exit) {
+    const r = test.hits.exit;
+    ctx.strokeStyle = 'rgba(148,157,176,.5)';
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 9);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(200,210,228,.75)';
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillText('離開', r.x + r.w / 2, r.y + r.h / 2);
+  }
   ctx.restore();
 
-  // 格點與燈
-  for (let gy = -TEST_LIMIT; gy <= TEST_LIMIT; gy++) {
-    for (let gx = -TEST_LIMIT; gx <= TEST_LIMIT; gx++) {
-      const { px, py } = place(gx, gy);
-      const lit = gx === test.x && gy === test.y;
-      if (lit) continue;                       // 亮的那顆最後畫
-      ctx.fillStyle = gx === 0 && gy === 0 ? '#39405a' : '#252c3e';
-      ctx.beginPath();
-      ctx.arc(px, py, pitch * 0.13, 0, TWO_PI);
-      ctx.fill();
-    }
-  }
-
-  const { px, py } = place(test.x, test.y);
-  const pulse = 1 + 0.25 * Math.max(0, 1 - (performance.now() - test.flash) / 220);
-  const rad = pitch * 0.34 * pulse;
-  const glow = ctx.createRadialGradient(px, py, 0, px, py, rad * 3.4);
-  glow.addColorStop(0, 'rgba(255,201,60,.85)');
-  glow.addColorStop(0.35, 'rgba(255,201,60,.28)');
+  // 燈
+  const pulse = 1 + 0.3 * Math.max(0, 1 - (performance.now() - test.flash) / 200);
+  const rad = 9 * pulse;
+  const glow = ctx.createRadialGradient(test.x, test.y, 0, test.x, test.y, rad * 4);
+  glow.addColorStop(0, 'rgba(255,201,60,.8)');
+  glow.addColorStop(0.35, 'rgba(255,201,60,.25)');
   glow.addColorStop(1, 'rgba(255,201,60,0)');
   ctx.fillStyle = glow;
   ctx.beginPath();
-  ctx.arc(px, py, rad * 3.4, 0, TWO_PI);
+  ctx.arc(test.x, test.y, rad * 4, 0, TWO_PI);
   ctx.fill();
   ctx.fillStyle = '#ffe9a6';
   ctx.beginPath();
-  ctx.arc(px, py, rad, 0, TWO_PI);
+  ctx.arc(test.x, test.y, rad, 0, TWO_PI);
   ctx.fill();
 
-  // 邊緣的裝置軸標示，橫放時會跟著轉。用 labelAt 夾進畫面內避免被切掉。
-  const edge = (TEST_LIMIT + 0.95) * pitch;
-  for (const [v, label] of [
-    [ay, '+Y 上'], [{ x: -ay.x, y: -ay.y }, '−Y 下'],
-    [ax, '+X 右'], [{ x: -ax.x, y: -ax.y }, '−X 左'],
-  ]) {
-    labelAt(ctx, cx + v.x * edge, cy - v.y * edge, label, '#5d6577', w, h);
-  }
-
-  // 座標讀數（上方保留區）
+  // 讀數面板。燈在上半部就擺下面，反之擺上面，才不會蓋到燈。
+  const dpr = window.devicePixelRatio || 1;
+  const dev = fromScreen({ x: test.x - cx, y: -(test.y - cy) });
+  const sign = (v) => (v >= 0 ? `+${Math.round(v)}` : `${Math.round(v)}`);
+  const lines = [
+    ['big', `( ${test.x} , ${test.y} )`],
+    ['sub', `裝置像素 (${Math.round(test.x * dpr)}, ${Math.round(test.y * dpr)})　dpr ${dpr}`],
+    ['sub', `裝置座標 (${sign(dev.x)}, ${sign(dev.y)})　原點中心・+y 朝上`],
+    ['dim', `畫布 ${Math.round(w)}×${Math.round(h)}　視窗 ${innerWidth}×${innerHeight}` +
+      `　螢幕 ${screen.width}×${screen.height}　方向 ${screen.orientation?.angle ?? 0}°`],
+  ];
+  const padY = 10;
+  const ph = padY * 2 + 34 + 16 * 2 + 14;
+  const py = test.y < h / 2 ? h - ph - 10 : 10;
   ctx.save();
+  ctx.fillStyle = 'rgba(11,13,18,.88)';
+  ctx.strokeStyle = '#2b3040';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(8, py, w - 16, ph, 10);
+  ctx.fill();
+  ctx.stroke();
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffc93c';
-  ctx.font = '600 28px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.fillText(`( ${test.x} , ${test.y} )`, cx, TOP / 2);
-  ctx.font = '11px system-ui, sans-serif';
-  ctx.fillStyle = '#46506b';
-  ctx.fillText(`螢幕方向 ${screen.orientation?.angle ?? 0}°　範圍 ±${TEST_LIMIT}`,
-    cx, h - BOTTOM / 2);
+  ctx.textBaseline = 'top';
+  let ty = py + padY;
+  for (const [kind, txt] of lines) {
+    if (kind === 'big') {
+      ctx.fillStyle = '#ffc93c';
+      ctx.font = '600 28px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText(txt, w / 2, ty);
+      ty += 34;
+    } else if (kind === 'sub') {
+      ctx.fillStyle = '#949db0';
+      ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText(txt, w / 2, ty);
+      ty += 16;
+    } else {
+      ctx.fillStyle = '#46506b';
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillText(txt, w / 2, ty);
+      ty += 14;
+    }
+  }
+  ctx.restore();
+
+  // 四個角的座標，標出原始座標系的範圍
+  ctx.save();
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = '#5d6577';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText('(0,0)', 4, h - 14);
+  ctx.textAlign = 'right';
+  ctx.fillText(`(${Math.round(w)},${Math.round(h)})`, w - 4, h - 14);
   ctx.restore();
 }
 
@@ -1356,14 +1512,14 @@ function setViewMode(mode) {
     els.chartPanel, els.sensorBar, els.legendMain]) {
     el.classList.toggle('hidden', testing);
   }
+  els.controlsTest.classList.toggle('hidden', !testing);
+  if (!testing && test.fs) toggleTestFullscreen();
   // 灰色的瞬時向量只有螢幕視角才畫
   els.lgRaw.style.display = mode === 'screen' ? '' : 'none';
 
   if (testing) {
-    test.x = 0;
-    test.y = 0;
-    test.flash = performance.now();
-    setStatus('座標測試：用十字鍵移動燈，按中間歸零', 'warn');
+    testSetPos(0, 0);
+    setStatus('座標測試：點畫面任一處或用十字鍵移動燈，按中間回到 (0,0)', 'warn');
   }
   try { localStorage.setItem('viewMode', mode); } catch { /* 無痕模式會丟錯 */ }
 }
@@ -1378,25 +1534,37 @@ els.view.addEventListener('pointerdown', (e) => {
   const r = els.view.getBoundingClientRect();
   const x = e.clientX - r.left;
   const y = e.clientY - r.top;
-  const inside = (b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
-  if (inside(test.hits.up)) testMove(0, 1);
-  else if (inside(test.hits.down)) testMove(0, -1);
-  else if (inside(test.hits.left)) testMove(-1, 0);
-  else if (inside(test.hits.right)) testMove(1, 0);
-  else if (inside(test.hits.center)) { test.x = 0; test.y = 0; test.flash = performance.now(); }
-  else return;
+  const inside = (box) => box && x >= box.x && x <= box.x + box.w
+    && y >= box.y && y <= box.y + box.h;
   e.preventDefault();
+
+  if (inside(test.hits.exit)) { toggleTestFullscreen(); return; }
+  for (const dir of ['up', 'down', 'left', 'right']) {
+    if (inside(test.hits[dir])) { testHold(dir); return; }
+  }
+  if (inside(test.hits.center)) { testSetPos(0, 0); return; }
+  testSetPos(x, y);                    // 點畫面任何一處，燈就跳過去
 });
+
+for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
+  els.view.addEventListener(ev, testStopHold);
+}
 
 window.addEventListener('keydown', (e) => {
   if (state.viewMode !== 'test') return;
+  const step = e.shiftKey ? 10 : 1;
   const moves = {
-    ArrowUp: [0, 1], ArrowDown: [0, -1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+    ArrowUp: [0, -step], ArrowDown: [0, step],
+    ArrowLeft: [-step, 0], ArrowRight: [step, 0],
   };
   const m = moves[e.key];
-  if (m) { testMove(m[0], m[1]); e.preventDefault(); }
-  else if (e.key === '0') { test.x = 0; test.y = 0; test.flash = performance.now(); }
+  if (m) { testSetPos(test.x + m[0], test.y + m[1]); e.preventDefault(); }
+  else if (e.key === '0') testSetPos(0, 0);
+  else if (e.key === 'f') toggleTestFullscreen();
 });
+
+els.btnFull.addEventListener('click', toggleTestFullscreen);
+els.btnOrigin.addEventListener('click', () => testSetPos(0, 0));
 
 els.selSpin.addEventListener('change', (e) => {
   state.spinMode = e.target.value;

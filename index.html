@@ -85,6 +85,11 @@
     </label>
   </section>
 
+  <section class="controls hidden" id="controlsTest">
+    <button id="btnFull" class="btn">全螢幕</button>
+    <button id="btnOrigin" class="btn ghost">回到 (0,0)</button>
+  </section>
+
   <section class="panel" id="chartPanel">
     <canvas id="chart" class="chart"></canvas>
     <div class="legend small">
@@ -116,8 +121,14 @@
     <p>這兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
 
     <h3>座標測試</h3>
-    <p>第三個分頁。進去時燈在 <strong>(0, 0)</strong>，用中間的十字鍵移動，上方顯示目前座標，按十字鍵中間歸零（電腦上也可以用方向鍵，按 0 歸零）。</p>
-    <p>它不只是玩具：燈的位置是<strong>裝置座標</strong>，而且走的是和紅綠箭頭<strong>完全同一條轉換路徑</strong>（<code>toScreen</code> 再對 canvas 的 y 取負號）。所以按「上」燈往螢幕上方跑，就代表那條路徑沒有顛倒；把手機轉成橫的，燈跟著 <code>screen.orientation.angle</code> 的補償一起驗證到，四周的 <code>+Y 上</code> / <code>+X 右</code> 標示也會跟著轉。要確認某支手機的方向有沒有問題，開這頁按四下最快。</p>
+    <p>第三個分頁，顯示<strong>整個畫面的原始像素座標</strong>，原點 (0, 0) 在左上角，和瀏覽器的 <code>clientX / clientY</code> 完全一致。</p>
+    <ul>
+      <li><strong>點畫面任何一處</strong>，燈就跳過去，直接讀出那一點的座標。</li>
+      <li><strong>十字鍵</strong>一次移動 1 px；按住會連發，0.6 秒後變 5 px、1.5 秒後變 20 px。中間的鈕回到 (0, 0)。</li>
+      <li><strong>全螢幕</strong>按鈕讓畫布填滿整個螢幕。iPhone 的 Safari 沒有 Fullscreen API（只有 iPad 有），這時會退成滿版覆蓋，上方會留系統列 —— 讀數列同時顯示<strong>畫布 / 視窗 / 螢幕</strong>三組尺寸，差多少一目了然。裝成 PWA 後可用空間最大。</li>
+      <li>電腦上可用方向鍵（按住 Shift 一次 10 px）、<code>0</code> 回原點、<code>f</code> 切換全螢幕。</li>
+    </ul>
+    <p>讀數同時給三組數字：<strong>原始像素</strong>、<strong>裝置像素</strong>（乘上 dpr，也就是真正的螢幕點數）、以及<strong>裝置座標</strong>——最後這組原點在畫面中心、+y 朝螢幕上方、已用 <code>screen.orientation.angle</code> 補償，正是紅綠箭頭真正用的那個座標系。兩組並排，轉換有沒有顛倒一眼就看得出來。</p>
 
     <h3>為什麼一定要先校正？</h3>
     <p>轉盤平面只要沒有完全水平，重力就會漏 <strong>g·sinθ</strong> 進水平面。而<strong>手機跟著轉盤轉、重力卻固定在房間裡</strong>，所以這個洩漏向量在裝置座標中<strong>每轉一圈就繞一圈</strong>，向心加速度卻是不動的：</p>
