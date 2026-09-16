@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v5';
+const BUILD = 'v6';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -75,7 +75,7 @@ const state = {
   leakAmp: 0,          // 重力洩漏振幅 m/s²
   tableTiltDeg: 0,     // 由洩漏振幅推得的轉盤傾斜角
 
-  viewMode: 'screen',  // 'screen' 手機自己的座標 | 'bird' 房間的鳥瞰
+  viewMode: 'screen',  // 'screen' 手機自己的座標 | 'bird' 房間的鳥瞰 | 'test' 座標測試
 
   range: 5,
   rangeMode: 'auto',
@@ -139,6 +139,13 @@ const els = {
   sbLeak: $('sbLeak'),
   tabScreen: $('tabScreen'),
   tabBird: $('tabBird'),
+  tabTest: $('tabTest'),
+  legendMain: $('legendMain'),
+  readouts: $('readouts'),
+  controlsMain: $('controlsMain'),
+  controlsOpts: $('controlsOpts'),
+  chartPanel: $('chartPanel'),
+  sensorBar: $('sensorBar'),
   lgRaw: $('lgRaw'),
 };
 
@@ -699,6 +706,140 @@ function labelAt(ctx, x, y, text, color, w, h) {
   ctx.restore();
 }
 
+// ---------------------------------------------------------------- 座標測試
+
+/**
+ * 座標測試畫面：十字鍵移動一顆燈，顯示目前座標。
+ *
+ * 燈的位置是「裝置座標」，而且走的是和紅綠箭頭完全同一條轉換路徑
+ * （toScreen + canvas 的 y 翻轉），所以按「上」燈往螢幕上方跑，就代表
+ * 那條路徑沒有顛倒。橫放時 screen.orientation.angle 的補償也一起驗證到。
+ */
+const TEST_LIMIT = 3;               // 座標範圍 ±3
+const test = { x: 0, y: 0, hits: null, flash: 0 };
+if (typeof window !== 'undefined') window.__test = test;
+
+function testMove(dx, dy) {
+  const nx = Math.min(TEST_LIMIT, Math.max(-TEST_LIMIT, test.x + dx));
+  const ny = Math.min(TEST_LIMIT, Math.max(-TEST_LIMIT, test.y + dy));
+  if (nx === test.x && ny === test.y) return;   // 撞到邊界
+  test.x = nx;
+  test.y = ny;
+  test.flash = performance.now();
+  if (navigator.vibrate) { try { navigator.vibrate(8); } catch { /* 略 */ } }
+}
+
+function drawTestView() {
+  const { ctx, w, h } = fitCanvas(els.view);
+  const TOP = 54;                      // 上方留給座標讀數
+  const BOTTOM = 22;                   // 下方留給螢幕方向
+  const size = Math.min(w, h - TOP - BOTTOM);
+  const cx = w / 2;
+  const cy = TOP + (h - TOP - BOTTOM) / 2;
+  const pitch = size / (TEST_LIMIT * 2 + 3);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#0b0d12';
+  ctx.fillRect(0, 0, w, h);
+
+  // 裝置座標 → canvas。和箭頭用同一條路徑。
+  const place = (gx, gy) => {
+    const s = toScreen({ x: gx, y: gy });
+    return { px: cx + s.x * pitch, py: cy - s.y * pitch };
+  };
+
+  // 軸線
+  const ax = toScreen({ x: 1, y: 0 });
+  const ay = toScreen({ x: 0, y: 1 });
+  const reach = (TEST_LIMIT + 0.7) * pitch;
+  ctx.strokeStyle = '#1c2231';
+  ctx.lineWidth = 1;
+  for (const v of [ax, ay]) {
+    ctx.beginPath();
+    ctx.moveTo(cx - v.x * reach, cy + v.y * reach);
+    ctx.lineTo(cx + v.x * reach, cy - v.y * reach);
+    ctx.stroke();
+  }
+
+  // 十字鍵（畫在燈的下層，所以燈永遠看得見）。
+  // 按鈕大小不跟著格點縮，並保底 44 CSS px 的觸控範圍。
+  const b = Math.max(44, size * 0.15);
+  const mk = (ox, oy) => ({ x: cx + ox - b / 2, y: cy + oy - b / 2, w: b, h: b });
+  test.hits = {
+    up: mk(0, -b), down: mk(0, b), left: mk(-b, 0), right: mk(b, 0),
+    center: mk(0, 0),
+  };
+  ctx.save();
+  ctx.strokeStyle = 'rgba(148,157,176,.38)';
+  ctx.fillStyle = 'rgba(148,157,176,.32)';
+  ctx.lineWidth = 1.5;
+  ctx.font = `${Math.round(b * 0.42)}px system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const [key, glyph] of [['up', '▲'], ['down', '▼'], ['left', '◀'], ['right', '▶']]) {
+    const r = test.hits[key];
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 9);
+    ctx.stroke();
+    ctx.fillText(glyph, r.x + r.w / 2, r.y + r.h / 2);
+  }
+  ctx.font = `${Math.round(b * 0.26)}px system-ui, sans-serif`;
+  ctx.fillStyle = 'rgba(148,157,176,.28)';
+  ctx.fillText('歸零', cx, cy);
+  ctx.restore();
+
+  // 格點與燈
+  for (let gy = -TEST_LIMIT; gy <= TEST_LIMIT; gy++) {
+    for (let gx = -TEST_LIMIT; gx <= TEST_LIMIT; gx++) {
+      const { px, py } = place(gx, gy);
+      const lit = gx === test.x && gy === test.y;
+      if (lit) continue;                       // 亮的那顆最後畫
+      ctx.fillStyle = gx === 0 && gy === 0 ? '#39405a' : '#252c3e';
+      ctx.beginPath();
+      ctx.arc(px, py, pitch * 0.13, 0, TWO_PI);
+      ctx.fill();
+    }
+  }
+
+  const { px, py } = place(test.x, test.y);
+  const pulse = 1 + 0.25 * Math.max(0, 1 - (performance.now() - test.flash) / 220);
+  const rad = pitch * 0.34 * pulse;
+  const glow = ctx.createRadialGradient(px, py, 0, px, py, rad * 3.4);
+  glow.addColorStop(0, 'rgba(255,201,60,.85)');
+  glow.addColorStop(0.35, 'rgba(255,201,60,.28)');
+  glow.addColorStop(1, 'rgba(255,201,60,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(px, py, rad * 3.4, 0, TWO_PI);
+  ctx.fill();
+  ctx.fillStyle = '#ffe9a6';
+  ctx.beginPath();
+  ctx.arc(px, py, rad, 0, TWO_PI);
+  ctx.fill();
+
+  // 邊緣的裝置軸標示，橫放時會跟著轉。用 labelAt 夾進畫面內避免被切掉。
+  const edge = (TEST_LIMIT + 0.95) * pitch;
+  for (const [v, label] of [
+    [ay, '+Y 上'], [{ x: -ay.x, y: -ay.y }, '−Y 下'],
+    [ax, '+X 右'], [{ x: -ax.x, y: -ax.y }, '−X 左'],
+  ]) {
+    labelAt(ctx, cx + v.x * edge, cy - v.y * edge, label, '#5d6577', w, h);
+  }
+
+  // 座標讀數（上方保留區）
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffc93c';
+  ctx.font = '600 28px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText(`( ${test.x} , ${test.y} )`, cx, TOP / 2);
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.fillStyle = '#46506b';
+  ctx.fillText(`螢幕方向 ${screen.orientation?.angle ?? 0}°　範圍 ±${TEST_LIMIT}`,
+    cx, h - BOTTOM / 2);
+  ctx.restore();
+}
+
 /** 鳥瞰視角的起始角度：手機畫在 3 點鐘方向，圓心在它左邊。 */
 const BIRD_BASE = 0;
 
@@ -844,6 +985,7 @@ function drawBirdView() {
 }
 
 function drawView() {
+  if (state.viewMode === 'test') { drawTestView(); return; }
   if (state.viewMode === 'bird') { drawBirdView(); return; }
   const { ctx, w, h } = fitCanvas(els.view);
   const size = Math.min(w, h);
@@ -1206,13 +1348,55 @@ function setViewMode(mode) {
   state.viewMode = mode;
   els.tabScreen.classList.toggle('on', mode === 'screen');
   els.tabBird.classList.toggle('on', mode === 'bird');
+  els.tabTest.classList.toggle('on', mode === 'test');
+
+  // 座標測試是獨立畫面，量測相關的區塊全部收起來
+  const testing = mode === 'test';
+  for (const el of [els.readouts, els.controlsMain, els.controlsOpts,
+    els.chartPanel, els.sensorBar, els.legendMain]) {
+    el.classList.toggle('hidden', testing);
+  }
   // 灰色的瞬時向量只有螢幕視角才畫
   els.lgRaw.style.display = mode === 'screen' ? '' : 'none';
+
+  if (testing) {
+    test.x = 0;
+    test.y = 0;
+    test.flash = performance.now();
+    setStatus('座標測試：用十字鍵移動燈，按中間歸零', 'warn');
+  }
   try { localStorage.setItem('viewMode', mode); } catch { /* 無痕模式會丟錯 */ }
 }
 
 els.tabScreen.addEventListener('click', () => setViewMode('screen'));
 els.tabBird.addEventListener('click', () => setViewMode('bird'));
+els.tabTest.addEventListener('click', () => setViewMode('test'));
+
+// 十字鍵畫在 canvas 上（這樣燈才能疊在它上面），所以用點擊座標做命中判定
+els.view.addEventListener('pointerdown', (e) => {
+  if (state.viewMode !== 'test' || !test.hits) return;
+  const r = els.view.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  const inside = (b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  if (inside(test.hits.up)) testMove(0, 1);
+  else if (inside(test.hits.down)) testMove(0, -1);
+  else if (inside(test.hits.left)) testMove(-1, 0);
+  else if (inside(test.hits.right)) testMove(1, 0);
+  else if (inside(test.hits.center)) { test.x = 0; test.y = 0; test.flash = performance.now(); }
+  else return;
+  e.preventDefault();
+});
+
+window.addEventListener('keydown', (e) => {
+  if (state.viewMode !== 'test') return;
+  const moves = {
+    ArrowUp: [0, 1], ArrowDown: [0, -1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+  };
+  const m = moves[e.key];
+  if (m) { testMove(m[0], m[1]); e.preventDefault(); }
+  else if (e.key === '0') { test.x = 0; test.y = 0; test.flash = performance.now(); }
+});
 
 els.selSpin.addEventListener('change', (e) => {
   state.spinMode = e.target.value;
@@ -1248,7 +1432,7 @@ if ('serviceWorker' in navigator) {
 
 let savedView = 'screen';
 try { savedView = localStorage.getItem('viewMode') || 'screen'; } catch { /* 略 */ }
-setViewMode(savedView === 'bird' ? 'bird' : 'screen');
+setViewMode(['bird', 'test'].includes(savedView) ? savedView : 'screen');
 
 els.sensorInfo.textContent = `${BUILD} · 尚未取得感測器資料`;
 setStatus('尚未開始 — 按下「開始測量」');

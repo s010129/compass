@@ -342,3 +342,5 @@ footer {
   background: var(--panel-2);
   font-weight: 650;
 }
+
+.hidden { display: none !important; }

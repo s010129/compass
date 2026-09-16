@@ -37,9 +37,10 @@
     <div class="viewtabs">
       <button id="tabScreen" class="tab on" type="button">螢幕視角</button>
       <button id="tabBird" class="tab" type="button">鳥瞰視角</button>
+      <button id="tabTest" class="tab" type="button">座標測試</button>
     </div>
     <canvas id="view" class="view"></canvas>
-    <div class="legend">
+    <div class="legend" id="legendMain">
       <span><i class="swatch red"></i>向心 a<sub>c</sub>（指向圓心）</span>
       <span><i class="swatch green"></i>切線 a<sub>t</sub>（沿速度方向）</span>
       <span id="lgRaw"><i class="swatch grey"></i>瞬時水平合成（含重力洩漏）</span>
@@ -55,14 +56,14 @@
     <div class="cell"><span class="k">水平合成 |a<sub>h</sub>|</span><span class="v" id="rdAh">–</span><span class="u">m/s²</span></div>
   </section>
 
-  <section class="controls">
+  <section class="controls" id="controlsMain">
     <button id="btnStart" class="btn primary">開始測量</button>
     <button id="btnCalib" class="btn" disabled>校正方向</button>
     <button id="btnClear" class="btn" disabled>清除校正</button>
     <button id="btnDemo" class="btn ghost">示範模式</button>
   </section>
 
-  <section class="controls compact">
+  <section class="controls compact" id="controlsOpts">
     <label class="field">
       <span>旋轉方向</span>
       <select id="selSpin">
@@ -84,7 +85,7 @@
     </label>
   </section>
 
-  <section class="panel">
+  <section class="panel" id="chartPanel">
     <canvas id="chart" class="chart"></canvas>
     <div class="legend small">
       <span><i class="swatch red"></i>a<sub>c</sub></span>
@@ -105,13 +106,18 @@
       <li><span class="red-t">紅色箭頭</span>指向圓心，長度正比於 a<sub>c</sub>。<span class="green-t">綠色箭頭</span>沿切線方向，長度正比於 a<sub>t</sub> = αr —— <strong>等速時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>，加速或煞車時才明顯。灰色箭頭是未經平均的瞬時讀值。</li>
     </ol>
 
-    <h3>兩種視角</h3>
-    <p>畫面上方可以切換，<strong>同一份資料、兩個參考系</strong>：</p>
+    <h3>三個視角</h3>
+    <p>畫面上方可以切換。前兩個是<strong>同一份資料、兩個參考系</strong>：</p>
     <ul>
       <li><strong>螢幕視角</strong>：手機自己的座標系。手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
       <li><strong>鳥瞰視角</strong>：房間的座標系。手機繞著圓心跑，藍色弧線是走過的軌跡。這是站在旁邊的人看到的樣子。</li>
+      <li><strong>座標測試</strong>：驗證螢幕座標轉換有沒有顛倒，見下一節。</li>
     </ul>
-    <p>兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
+    <p>這兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
+
+    <h3>座標測試</h3>
+    <p>第三個分頁。進去時燈在 <strong>(0, 0)</strong>，用中間的十字鍵移動，上方顯示目前座標，按十字鍵中間歸零（電腦上也可以用方向鍵，按 0 歸零）。</p>
+    <p>它不只是玩具：燈的位置是<strong>裝置座標</strong>，而且走的是和紅綠箭頭<strong>完全同一條轉換路徑</strong>（<code>toScreen</code> 再對 canvas 的 y 取負號）。所以按「上」燈往螢幕上方跑，就代表那條路徑沒有顛倒；把手機轉成橫的，燈跟著 <code>screen.orientation.angle</code> 的補償一起驗證到，四周的 <code>+Y 上</code> / <code>+X 右</code> 標示也會跟著轉。要確認某支手機的方向有沒有問題，開這頁按四下最快。</p>
 
     <h3>為什麼一定要先校正？</h3>
     <p>轉盤平面只要沒有完全水平，重力就會漏 <strong>g·sinθ</strong> 進水平面。而<strong>手機跟著轉盤轉、重力卻固定在房間裡</strong>，所以這個洩漏向量在裝置座標中<strong>每轉一圈就繞一圈</strong>，向心加速度卻是不動的：</p>
