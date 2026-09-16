@@ -1,5 +1,13 @@
-/* 離線快取：資源少而且都是靜態檔，採 cache-first 並在背景更新。 */
-const VERSION = 'v1';
+/*
+ * 離線快取。
+ *
+ * 程式碼類的檔案走 network-first：有網路就一定拿到最新版，離線才回頭用快取。
+ * 之前用 cache-first，結果推了新版之後手機還是跑舊的（要重整兩次才會換），
+ * 裝成 PWA 之後更難察覺。圖檔不會變，維持 cache-first。
+ *
+ * 改動程式碼時記得把 VERSION 一起往上跳，並和 src/app.js 的 BUILD 保持一致。
+ */
+const VERSION = 'v3';
 const CACHE = `turntable-${VERSION}`;
 
 const ASSETS = [
@@ -15,6 +23,9 @@ const ASSETS = [
   'icons/apple-touch-icon.png',
   'icons/favicon-32.png',
 ];
+
+/** 圖檔以外都當成程式碼，要優先拿網路上的版本。 */
+const isImmutable = (url) => /\.(png|ico|svg|jpg|webp)$/i.test(url.pathname);
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
@@ -36,20 +47,31 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+
+  if (isImmutable(url)) {
+    e.respondWith(
+      caches.match(req).then((hit) => hit || fetch(req).then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })),
+    );
+    return;
+  }
 
   e.respondWith(
-    caches.match(req).then((hit) => {
-      const net = fetch(req)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => hit);
-      return hit || net;
-    }),
+    fetch(req)
+      .then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() => caches.match(req).then((hit) => hit || caches.match('index.html'))),
   );
 });

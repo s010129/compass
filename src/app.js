@@ -11,6 +11,9 @@
  */
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
+/** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
+const BUILD = 'v3';
+
 const G = 9.80665;
 const DEG = Math.PI / 180;
 
@@ -34,9 +37,16 @@ const state = {
   h: { x: 0, y: 0 },   // 扣掉偏移後的水平加速度（裝置座標）
   raw: { x: 0, y: 0, z: 0 },
 
-  omega: 0,            // 繞裝置 z 軸的角速度 rad/s（+ 為逆時針）
+  omega: 0,            // 繞裝置 z 軸的角速度 rad/s（+ 為逆時針，已套用 gyroSign）
   alpha: 0,            // 角加速度 rad/s²
+  omegaRaw: 0,         // 陀螺儀原始讀值（平滑後，未套用 gyroSign）
+  alphaRaw: 0,
   hasGyro: false,
+  gyroSign: 1,         // 陀螺儀正負號慣例，由資料自動判定
+  gyroVote: 0,         // 判定用的累積證據
+  gyroFlips: 0,        // 翻轉次數，用來加大遲滯避免來回跳
+  cRef: null,          // 等速時的 ĥ，判定陀螺儀正負號時當獨立參考
+  cRefSteady: 0,       // cRef 在等速中被更新過幾次
 
   cHat: null,          // 圓心方向單位向量（裝置座標）
   centerLocked: false,
@@ -53,6 +63,9 @@ const state = {
   sampleCount: 0,
   hz: 0,
 };
+
+// 除錯用：在主控台打 __state 可以看到所有內部估計值
+if (typeof window !== 'undefined') window.__state = state;
 
 const chartData = [];   // {t, ac, at, w}，只留最近幾秒
 const csvRows = [];     // 完整紀錄，供匯出
@@ -143,13 +156,17 @@ function handleSample(raw, rotZdeg, t) {
   state.h = h;
   const hMag = Math.hypot(h.x, h.y);
 
-  // 3) 角速度：陀螺儀繞 z 軸的分量
+  // 3) 角速度：陀螺儀繞 z 軸的分量。
+  //    iOS 和 Android 的正負號慣例不保證一致，所以先留原始值，
+  //    再乘上自動判定出來的 gyroSign（見步驟 5）。
   if (rotZdeg !== null && rotZdeg !== undefined) {
     state.hasGyro = true;
     const w = rotZdeg * DEG;
-    const prev = state.omega;
-    state.omega += (w - prev) * 0.25;
-    state.alpha += ((state.omega - prev) / dt - state.alpha) * 0.1;
+    const prev = state.omegaRaw;
+    state.omegaRaw += (w - prev) * 0.25;
+    state.alphaRaw += ((state.omegaRaw - prev) / dt - state.alphaRaw) * 0.1;
+    state.omega = state.omegaRaw * state.gyroSign;
+    state.alpha = state.alphaRaw * state.gyroSign;
   }
 
   // 4) 旋轉方向：決定切線要指哪一邊
@@ -183,6 +200,49 @@ function handleSample(raw, rotZdeg, t) {
       x: (h.x * cs - h.y * sn) / hMag,
       y: (h.x * sn + h.y * cs) / hMag,
     };
+    // 陀螺儀正負號慣例的自動判定。
+    //
+    // 參考方向 cRef 只在「等速」時更新 —— 這時 φ ≈ 0，ĥ 就直接等於 ĉ，
+    // 而且和陀螺儀的正負號假設無關，所以是乾淨的參考。轉速在變的時候凍結，
+    // 否則起轉階段 ĥ 幾乎全是切線分量，參考方向會被帶歪而投出錯誤的票。
+    //
+    // 有了乾淨的 ĉ 之後：ĉ = rotate(ĥ, +φ) 表示「從 ĥ 轉到 ĉ 要轉 φ」，
+    // 所以實際夾角 ψ = angle(ĥ → cRef) 應該和陀螺儀預測的 φ 同號。
+    // 異號就表示陀螺儀的正負號慣例和我們假設的相反。
+    // 等速時 φ ≈ 0，兩種假設在數學上無從分辨，這時不投票。
+    const hx = h.x / hMag;
+    const hy = h.y / hMag;
+    const steadySpeed = Math.abs(phi) < 0.05;
+    if (!state.cRef) {
+      state.cRef = { x: hx, y: hy };
+    } else if (steadySpeed) {
+      const rx = state.cRef.x + (hx - state.cRef.x) * 0.05;
+      const ry = state.cRef.y + (hy - state.cRef.y) * 0.05;
+      const rn = Math.hypot(rx, ry) || 1;
+      state.cRef = { x: rx / rn, y: ry / rn };
+      state.cRefSteady++;
+    }
+
+    // 參考方向還沒在等速中收斂過就不投票 —— 寧可不判斷，也不要判斷錯
+    if (state.hasGyro && !state.centerLocked
+        && state.cRefSteady > 60 && Math.abs(phi) > 0.08) {
+      const psi = Math.atan2(
+        hx * state.cRef.y - hy * state.cRef.x,
+        hx * state.cRef.x + hy * state.cRef.y,
+      );
+      if (Math.abs(psi) > 0.05) {
+        // 同號加分、異號扣分，權重取兩者較小的角度以免被雜訊放大
+        state.gyroVote += Math.sign(phi * psi) * Math.min(Math.abs(phi), Math.abs(psi));
+        state.gyroVote = Math.min(30, Math.max(-30, state.gyroVote));
+        // 翻過越多次門檻越高，避免在雜訊裡來回跳
+        if (state.gyroVote < -4 * (1 + state.gyroFlips) && state.gyroFlips < 4) {
+          state.gyroSign *= -1;
+          state.gyroFlips++;
+          state.gyroVote = 0;
+        }
+      }
+    }
+
     const flipped = state.cHat && u.x * state.cHat.x + u.y * state.cHat.y < 0;
     if (!state.cHat || (flipped && !state.centerLocked)) {
       // 幾乎反向時低通會卡在反方向（正規化後是個不動點），直接翻過去
@@ -262,7 +322,12 @@ async function startSensor() {
       return false;
     }
     if (res !== 'granted') {
-      setStatus('沒有取得動作感測器權限', 'err');
+      // iOS 還有一個系統層的總開關，關掉的話這裡一定回 denied
+      setStatus(
+        '沒有取得動作感測器權限。iOS 請到「設定 → Safari → 動作與方向存取」打開，' +
+        '再重新載入頁面',
+        'err',
+      );
       return false;
     }
   }
@@ -507,6 +572,33 @@ function drawView() {
     : { x: -state.cHat.y, y: state.cHat.x };
   const tS = toScreen(tHat);
 
+  // 圓周軌跡：以 ĉ 方向為圓心畫一段通過手機的圓弧，並標出前進方向。
+  // 半徑只是示意（實際 r 會變），重點是讓畫面和真實的轉盤幾何對得上。
+  {
+    const Ro = R * 0.78;
+    const ox = cx + c.x * Ro;
+    const oy = cy - c.y * Ro;
+    const a0 = Math.atan2(cy - oy, cx - ox); // 手機在軌跡上的角度
+    ctx.save();
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = 'rgba(140,152,180,.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(ox, oy, Ro, a0 - 1.15, a0 + 1.15);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 前進方向的小箭頭，畫在手機前方一點的軌跡上
+    const ahead = a0 + (state.spin > 0 ? -0.75 : 0.75);
+    const px = ox + Math.cos(ahead) * Ro;
+    const py = oy + Math.sin(ahead) * Ro;
+    const tang = state.spin > 0
+      ? { x: Math.sin(ahead), y: -Math.cos(ahead) }
+      : { x: -Math.sin(ahead), y: Math.cos(ahead) };
+    arrow(ctx, px - tang.x * 8, py - tang.y * 8,
+      px + tang.x * 10, py + tang.y * 10, 'rgba(140,152,180,.75)', 2.5);
+    ctx.restore();
+  }
+
   // 軸線：紅色指向圓心、綠色為切線軸
   ctx.save();
   ctx.setLineDash([4, 5]);
@@ -695,14 +787,14 @@ function updateReadouts() {
 
   els.sbRate.textContent = `${state.hz.toFixed(0)} Hz`;
   els.sbGyro.innerHTML = state.hasGyro
-    ? '陀螺儀 <span class="good">✓</span>'
+    ? `陀螺儀 <span class="good">✓</span>${state.gyroSign < 0 ? ' <span class="bad">(已翻轉)</span>' : ''}`
     : '陀螺儀 <span class="bad">✗</span>';
   const tiltBad = state.tiltDeg >= 10;
   els.sbTilt.innerHTML = `傾斜 <span class="${tiltBad ? 'bad' : 'good'}">` +
     `${state.tiltDeg.toFixed(1)}°</span>`;
   els.sbMag.textContent = `|a_h| ${fmt(hMag)}`;
   els.sensorInfo.textContent =
-    `${state.sampleCount} 筆 · ${state.hz.toFixed(0)} Hz · ` +
+    `${BUILD} · ${state.sampleCount} 筆 · ${state.hz.toFixed(0)} Hz · ` +
     `慣例 ${state.signConv > 0 ? '規範(+z)' : 'iOS(−z)'} · ` +
     `螢幕 ${screen.orientation?.angle ?? 0}° · ` +
     `ax ${fmt(state.raw.x, 1)} ay ${fmt(state.raw.y, 1)} az ${fmt(state.raw.z, 1)}`;
@@ -773,6 +865,15 @@ function resetEstimators() {
   state.gzLP = 0;
   state.fzLP = 0;
   state.convReady = false;
+  state.gyroSign = 1;
+  state.gyroVote = 0;
+  state.gyroFlips = 0;
+  state.cRef = null;
+  state.cRefSteady = 0;
+  state.omegaRaw = 0;
+  state.alphaRaw = 0;
+  state.omega = 0;
+  state.alpha = 0;
   state.cHat = null;
   state.centerLocked = false;
   state.ac = 0;
@@ -836,5 +937,6 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+els.sensorInfo.textContent = `${BUILD} · 尚未取得感測器資料`;
 setStatus('尚未開始 — 按下「開始測量」');
 requestAnimationFrame(loop);
