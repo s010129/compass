@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>轉盤向心力感測器</title>
+<meta name="description" content="用手機加速度計量測平放在旋轉桌上的向心加速度與切線加速度">
+<meta name="theme-color" content="#0e1016">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="向心力">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <canvas id="compassIcon" class="compass-icon" width="64" height="64"
+          aria-label="Minecraft 羅盤，指針指向圓心方向"></canvas>
+  <div class="titles">
+    <h1>轉盤向心力感測器</h1>
+    <p id="statusLine" class="status">尚未開始 — 按下「開始測量」</p>
+  </div>
+</header>
+
+<main>
+
+  <section class="panel">
+    <canvas id="view" class="view"></canvas>
+    <div class="legend">
+      <span><i class="swatch red"></i>向心 a<sub>c</sub>（指向圓心）</span>
+      <span><i class="swatch green"></i>切線 a<sub>t</sub>（沿速度方向）</span>
+    </div>
+  </section>
+
+  <section class="readouts" id="readouts">
+    <div class="cell"><span class="k">向心 a<sub>c</sub></span><span class="v" id="rdAc">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k">切線 a<sub>t</sub></span><span class="v" id="rdAt">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k">角速度 ω</span><span class="v" id="rdRpm">–</span><span class="u">rpm</span></div>
+    <div class="cell"><span class="k">半徑 r</span><span class="v" id="rdR">–</span><span class="u">m</span></div>
+    <div class="cell"><span class="k">線速度 v</span><span class="v" id="rdV">–</span><span class="u">m/s</span></div>
+    <div class="cell"><span class="k">水平合成 |a<sub>h</sub>|</span><span class="v" id="rdAh">–</span><span class="u">m/s²</span></div>
+  </section>
+
+  <section class="controls">
+    <button id="btnStart" class="btn primary">開始測量</button>
+    <button id="btnTare" class="btn" disabled>歸零校正</button>
+    <button id="btnLock" class="btn" disabled>鎖定圓心方向</button>
+    <button id="btnDemo" class="btn ghost">示範模式</button>
+  </section>
+
+  <section class="controls compact">
+    <label class="field">
+      <span>旋轉方向</span>
+      <select id="selSpin">
+        <option value="auto">自動（陀螺儀）</option>
+        <option value="ccw">逆時針 ↺</option>
+        <option value="cw">順時針 ↻</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>量程</span>
+      <select id="selRange">
+        <option value="auto">自動</option>
+        <option value="2">2 m/s²</option>
+        <option value="5">5 m/s²</option>
+        <option value="10">10 m/s²</option>
+        <option value="20">20 m/s²</option>
+        <option value="50">50 m/s²</option>
+      </select>
+    </label>
+  </section>
+
+  <section class="panel">
+    <canvas id="chart" class="chart"></canvas>
+    <div class="legend small">
+      <span><i class="swatch red"></i>a<sub>c</sub></span>
+      <span><i class="swatch green"></i>a<sub>t</sub></span>
+      <span><i class="swatch blue"></i>ω</span>
+      <span class="grow"></span>
+      <button id="btnCsv" class="btn tiny" disabled>匯出 CSV</button>
+    </div>
+  </section>
+
+  <details class="help">
+    <summary>使用方式與原理</summary>
+    <ol>
+      <li>手機<strong>螢幕朝上平放</strong>在旋轉桌上，用膠帶或夾具固定，不要讓它滑動。</li>
+      <li>轉盤靜止時按 <strong>歸零校正</strong>，扣掉桌面沒有完全水平造成的重力分量。</li>
+      <li>按 <strong>開始測量</strong> 後轉動轉盤。<span class="red-t">紅色箭頭</span>會指向圓心，長度正比於向心加速度 a<sub>c</sub> = ω²r。</li>
+      <li><span class="green-t">綠色箭頭</span>沿著切線方向，長度正比於切線加速度 a<sub>t</sub> = αr。<strong>等速旋轉時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>；手動加速或煞車時才會明顯變長。綠色虛線標出切線軸的位置，箭頭指向速度方向。</li>
+      <li>轉速穩定後按 <strong>鎖定圓心方向</strong>，之後圓心方向就不再跟著漂移，量到的切線分量會更乾淨。</li>
+    </ol>
+    <h3>方向是怎麼定出來的</h3>
+    <ul>
+      <li>裝置座標：<strong>+x 為螢幕右方、+y 為螢幕上方、+z 穿出螢幕</strong>。螢幕朝上平放時，規範下 <code>accelerationIncludingGravity.z ≈ +9.8</code>；iOS 回傳的正負號相反，程式會由 z 軸讀值自動判斷並修正。</li>
+      <li>修正後，量到的<strong>水平分量就等於真實加速度的水平分量</strong>（重力只有 z 分量），方向直接指向圓心，所以紅箭頭 = 水平分量方向。</li>
+      <li>畫面上 canvas 的 y 軸向下，和裝置 +y 相反，因此繪圖時對 y 取負號；另外用 <code>screen.orientation.angle</code> 補償橫豎屏，所以轉成橫向時箭頭也不會顛倒。</li>
+      <li>切線方向 = 圓心方向轉 90°，轉哪一邊由旋轉方向決定：ω &gt; 0（由螢幕上方往下看是逆時針）時，t̂ = (ĉ<sub>y</sub>, −ĉ<sub>x</sub>)。陀螺儀不可用時請用上方的下拉選單手動指定。</li>
+      <li>圓心方向本身怎麼定？圓周運動的加速度是 <strong>h = r·[ω²·ĉ + ω̇·rotate(ĉ, −90°)]</strong>，所以 h 的方向會從圓心方向偏掉 φ = atan2(ω̇, ω²)（和半徑無關）。程式把量到的方向轉回 +φ 再做低通，因此<strong>轉盤在加速或煞車時，圓心方向也不會被切線分量帶歪</strong>。沒有陀螺儀時退回 φ = 0，需要等速一段時間才會收斂。</li>
+      <li>半徑由 r = a<sub>c</sub> / ω² 推算，線速度 v = ωr。</li>
+    </ul>
+    <p class="note">靈感來自 phyphox 的「向心加速度」實驗。本頁完全在手機端運算，不會上傳任何資料。</p>
+  </details>
+
+  <footer>
+    <span id="sensorInfo">—</span>
+  </footer>
+</main>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
