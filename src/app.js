@@ -8,14 +8,35 @@
  *   裝置座標 device frame：+x 螢幕右、+y 螢幕上、+z 穿出螢幕
  *   螢幕座標 screen frame：同上，但已用 screen.orientation.angle 補償橫豎屏
  *   canvas 座標：+x 向右、+y 向下 —— 所以畫圖時 y 要取負號
+ *
+ * 核心問題：轉盤平面只要沒有完全水平，重力就會漏 g·sinθ 進水平面。
+ * 手機跟著轉盤轉、重力卻固定在房間裡，所以這個洩漏向量在裝置座標中
+ * 每轉一圈就繞一圈，而向心加速度在裝置座標中是不動的：
+ *
+ *     h(t) = a_c·ĉ + a_t·t̂  +  g·sinθ·(以 −ω 旋轉的單位向量)
+ *            └── 直流 ──┘      └────── 頻率 ω 的正弦 ──────┘
+ *
+ * 歸零校正扣不掉它（那只能扣常數偏移），一般低通也濾不掉。
+ * 唯一乾淨的解法是「對整數圈取平均」—— 正弦在整數週期上積分恰好為零。
+ * 所以本程式改成校正優先：先轉幾圈把方向定出來鎖住，之後才即時顯示。
+ *
+ * 方向一律只用加速度計決定，陀螺儀只用來取 |ω|（與正負號慣例無關），
+ * 供計算轉速、半徑、以及「轉了幾圈」用。
  */
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v3';
+const BUILD = 'v4';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
+const TWO_PI = Math.PI * 2;
+
+/** 校正時要取樣幾圈；越多圈殘餘洩漏越小。 */
+const CALIB_REVS = 3;
+/** 沒有陀螺儀時改用固定時間窗（秒），無法保證整數圈。 */
+const CALIB_SECONDS_NO_GYRO = 8;
+const LIVE_SECONDS_NO_GYRO = 2.5;
 
 // ---------------------------------------------------------------- 狀態
 
@@ -25,39 +46,37 @@ const state = {
 
   /** accelerationIncludingGravity 的正負號慣例：+1 為規範、-1 為 iOS */
   signConv: 1,
-  gzLP: 0,             // 原始 z 的低通，用來判斷慣例與是否平放
-  convReady: false,    // 慣例是否已判定
-  fzLP: 0,             // 修正後 z 的低通
-  tiltDeg: 0,          // 手機偏離水平的角度
-  level: true,         // 是否夠平，不平時分解結果無意義
+  gzLP: 0,
+  convReady: false,
+  fzLP: 0,
+  tiltDeg: 0,          // 手機平面偏離水平的角度（由 f_z 推得）
+  level: true,
 
-  offX: 0,             // 歸零校正的水平偏移（裝置座標）
-  offY: 0,
-
-  h: { x: 0, y: 0 },   // 扣掉偏移後的水平加速度（裝置座標）
+  h: { x: 0, y: 0 },   // 水平加速度（裝置座標）
+  hMag: 0,
   raw: { x: 0, y: 0, z: 0 },
 
-  omega: 0,            // 繞裝置 z 軸的角速度 rad/s（+ 為逆時針，已套用 gyroSign）
-  alpha: 0,            // 角加速度 rad/s²
-  omegaRaw: 0,         // 陀螺儀原始讀值（平滑後，未套用 gyroSign）
-  alphaRaw: 0,
+  omega: 0,            // |ω|，rad/s。只取大小，不管正負號慣例
   hasGyro: false,
-  gyroSign: 1,         // 陀螺儀正負號慣例，由資料自動判定
-  gyroVote: 0,         // 判定用的累積證據
-  gyroFlips: 0,        // 翻轉次數，用來加大遲滯避免來回跳
-  cRef: null,          // 等速時的 ĥ，判定陀螺儀正負號時當獨立參考
-  cRefSteady: 0,       // cRef 在等速中被更新過幾次
+  psi: 0,              // 累積轉角（弧度）
 
+  // 方向（校正後鎖定）
   cHat: null,          // 圓心方向單位向量（裝置座標）
-  centerLocked: false,
-  spin: 1,             // +1 逆時針、-1 順時針
-
-  ac: 0,
-  at: 0,
-
-  range: 5,            // 目前量程 m/s²
-  rangeMode: 'auto',
+  spin: 1,             // +1 逆時針、-1 順時針（螢幕上看）
+  calibrated: false,
   spinMode: 'auto',
+
+  // 分量
+  ac: 0, at: 0,        // 瞬時
+  acAvg: 0, atAvg: 0,  // 每圈平均（洩漏已抵消）
+  omegaAvg: 0,         // 同一個窗內的 ω 平均，算半徑時要和 a_c 配對
+
+  // 診斷
+  leakAmp: 0,          // 重力洩漏振幅 m/s²
+  tableTiltDeg: 0,     // 由洩漏振幅推得的轉盤傾斜角
+
+  range: 5,
+  rangeMode: 'auto',
 
   lastT: 0,
   sampleCount: 0,
@@ -67,9 +86,27 @@ const state = {
 // 除錯用：在主控台打 __state 可以看到所有內部估計值
 if (typeof window !== 'undefined') window.__state = state;
 
-const chartData = [];   // {t, ac, at, w}，只留最近幾秒
-const csvRows = [];     // 完整紀錄，供匯出
-const CHART_SPAN = 12;  // 秒
+/** 校正流程的狀態機。 */
+const calib = {
+  active: false,
+  phase: 'idle',       // 'still' | 'spinup' | 'collect' | 'done'
+  stillBuf: [],
+  stillMag: 0,
+  samples: [],         // collect 階段的 {x, y}
+  psi0: 0,
+  t0: 0,
+  sumX: 0,
+  sumY: 0,
+  speedBuf: [],        // 最近的轉速，用來判斷是否等速
+  speed0: 0,           // 開始取樣時的轉速
+};
+
+/** 每圈平均用的環形緩衝。 */
+const revBuf = { items: [], sumC: 0, sumT: 0, sumW: 0, psi: 0, secs: 0 };
+
+const chartData = [];
+const csvRows = [];
+const CHART_SPAN = 12;
 const CSV_LIMIT = 40000;
 
 // ---------------------------------------------------------------- DOM
@@ -82,8 +119,8 @@ const els = {
   status: $('statusLine'),
   sensorInfo: $('sensorInfo'),
   btnStart: $('btnStart'),
-  btnTare: $('btnTare'),
-  btnLock: $('btnLock'),
+  btnCalib: $('btnCalib'),
+  btnClear: $('btnClear'),
   btnDemo: $('btnDemo'),
   btnCsv: $('btnCsv'),
   selSpin: $('selSpin'),
@@ -97,7 +134,7 @@ const els = {
   sbRate: $('sbRate'),
   sbGyro: $('sbGyro'),
   sbTilt: $('sbTilt'),
-  sbMag: $('sbMag'),
+  sbLeak: $('sbLeak'),
 };
 
 function setStatus(text, kind = '') {
@@ -105,12 +142,9 @@ function setStatus(text, kind = '') {
   els.status.className = `status ${kind}`;
 }
 
-// ---------------------------------------------------------------- 計算
+// ---------------------------------------------------------------- 工具
 
-/**
- * 螢幕方向補償：把裝置座標的向量轉到使用者眼中的螢幕座標。
- * 相當於繞 z 軸轉 −θ，θ 為 screen.orientation.angle。
- */
+/** 螢幕方向補償：把裝置座標的向量轉到使用者眼中的螢幕座標（繞 z 轉 −θ）。 */
 function toScreen(v) {
   const angle = (screen.orientation?.angle ?? window.orientation ?? 0) * DEG;
   const c = Math.cos(angle);
@@ -118,17 +152,237 @@ function toScreen(v) {
   return { x: v.x * c + v.y * s, y: -v.x * s + v.y * c };
 }
 
-/** 收到一筆感測器資料（或示範模式的模擬資料）。 */
+/** ω > 0（螢幕上看逆時針）時的切線方向 t̂ = (ĉy, −ĉx)。 */
+function tangentOf(c, spin) {
+  return spin > 0 ? { x: c.y, y: -c.x } : { x: -c.y, y: c.x };
+}
+
+const norm = (x, y) => {
+  const n = Math.hypot(x, y) || 1;
+  return { x: x / n, y: y / n };
+};
+
+// ---------------------------------------------------------------- 每圈平均
+
+/**
+ * 維持「最近一整圈」的分量平均。洩漏在裝置座標中是頻率 ω 的正弦，
+ * 在整數圈上積分為零，所以這個平均值就是乾淨的 a_c / a_t。
+ */
+function pushRevolution(ac, at, w, dpsi, dt) {
+  revBuf.items.push({ ac, at, w, dpsi, dt });
+  revBuf.sumC += ac;
+  revBuf.sumT += at;
+  revBuf.sumW += w;
+  revBuf.psi += dpsi;
+  revBuf.secs += dt;
+
+  const useAngle = state.hasGyro && state.omega > 0.3;
+  while (revBuf.items.length > 1) {
+    const over = useAngle
+      ? revBuf.psi - TWO_PI
+      : revBuf.secs - LIVE_SECONDS_NO_GYRO;
+    if (over <= 0) break;
+    const old = revBuf.items.shift();
+    revBuf.sumC -= old.ac;
+    revBuf.sumT -= old.at;
+    revBuf.sumW -= old.w;
+    revBuf.psi -= old.dpsi;
+    revBuf.secs -= old.dt;
+  }
+  const n = revBuf.items.length;
+  state.acAvg = revBuf.sumC / n;
+  state.atAvg = revBuf.sumT / n;
+  state.omegaAvg = revBuf.sumW / n;
+}
+
+function resetRevolution() {
+  revBuf.items.length = 0;
+  revBuf.sumC = revBuf.sumT = revBuf.sumW = revBuf.psi = revBuf.secs = 0;
+  state.acAvg = state.atAvg = state.omegaAvg = 0;
+}
+
+// ---------------------------------------------------------------- 校正
+
+function startCalibration() {
+  calib.active = true;
+  calib.phase = 'still';
+  calib.stillBuf.length = 0;
+  calib.samples.length = 0;
+  calib.speedBuf.length = 0;
+  calib.sumX = calib.sumY = 0;
+  state.calibrated = false;
+  state.cHat = null;
+  resetRevolution();
+  els.btnCalib.classList.add('on');
+  els.btnCalib.textContent = '取消校正';
+}
+
+function stopCalibration() {
+  calib.active = false;
+  calib.phase = 'idle';
+  els.btnCalib.classList.remove('on');
+  els.btnCalib.textContent = '校正方向';
+}
+
+/**
+ * 校正完成時從 collect 階段的樣本一次算出所有東西。
+ *
+ *   平均值   → 圓心方向 ĉ 與 a_c（整數圈平均，洩漏抵消）
+ *   殘差     → 重力洩漏，其振幅換算成轉盤傾斜角
+ *   殘差轉向 → 旋轉方向。房間裡固定的向量在裝置座標中以 −ω 旋轉，
+ *              所以洩漏轉的方向和轉盤相反。
+ */
+function finishCalibration() {
+  const n = calib.samples.length;
+  const mx = calib.sumX / n;
+  const my = calib.sumY / n;
+  const mean = Math.hypot(mx, my);
+
+  if (mean < 0.05) {
+    setStatus('校正失敗：向心加速度太小。手機要放在遠離圓心的位置，並轉快一點', 'err');
+    stopCalibration();
+    return;
+  }
+
+  state.cHat = norm(mx, my);
+
+  // 殘差 = 重力洩漏
+  let sumSq = 0;
+  let cross = 0;
+  let prev = null;
+  for (const s of calib.samples) {
+    const lx = s.x - mx;
+    const ly = s.y - my;
+    sumSq += lx * lx + ly * ly;
+    if (prev) cross += prev.x * ly - prev.y * lx;
+    prev = { x: lx, y: ly };
+  }
+  state.leakAmp = Math.sqrt(sumSq / n);          // 正弦的 RMS 合成即振幅
+  state.tableTiltDeg = Math.asin(Math.min(1, state.leakAmp / G)) / DEG;
+
+  // cross > 0 表示洩漏在裝置座標中逆時針轉 → 轉盤是順時針
+  if (state.spinMode === 'auto') {
+    if (Math.abs(cross) > 1e-4 && state.leakAmp > 0.03) {
+      state.spin = cross > 0 ? -1 : 1;
+    }
+  }
+
+  state.calibrated = true;
+  stopCalibration();
+  resetRevolution();
+
+  setStatus(
+    `校正完成：圓心方向已鎖定，${state.spin > 0 ? '逆時針' : '順時針'}；` +
+    `轉盤傾斜 ${state.tableTiltDeg.toFixed(1)}°（造成 ±${state.leakAmp.toFixed(2)} m/s² 的週期誤差，已由每圈平均消除）`,
+    'ok',
+  );
+}
+
+function stepCalibration(dt) {
+  const h = state.h;
+  const mag = state.hMag;
+
+  if (calib.phase === 'still') {
+    calib.stillBuf.push({ x: h.x, y: h.y });
+    if (calib.stillBuf.length > 90) calib.stillBuf.shift();
+    if (calib.stillBuf.length < 90) {
+      setStatus('校正 1/3：讓轉盤完全靜止…', 'warn');
+      return;
+    }
+    // 看這段時間內的變動量，而不是大小 —— 桌面歪的時候靜止讀值也不是 0
+    let mx = 0;
+    let my = 0;
+    for (const s of calib.stillBuf) { mx += s.x; my += s.y; }
+    mx /= calib.stillBuf.length;
+    my /= calib.stillBuf.length;
+    let dev = 0;
+    for (const s of calib.stillBuf) {
+      dev = Math.max(dev, Math.hypot(s.x - mx, s.y - my));
+    }
+    if (dev < 0.08) {
+      calib.stillMag = Math.hypot(mx, my);
+      calib.phase = 'spinup';
+      setStatus('校正 2/3：現在把轉盤轉起來，維持同一個方向', 'warn');
+    } else {
+      setStatus(`校正 1/3：讓轉盤完全靜止…（還在晃動 ${dev.toFixed(2)} m/s²）`, 'warn');
+    }
+    return;
+  }
+
+  // 取樣一定要等到等速才能開始。轉盤還在加速時，a_c 一路長大、a_t 又不是 0，
+  // 平均值會被切線分量拉歪，殘差也會被 a_c 的變化蓋過，連帶把傾斜角估爆。
+  // 摩擦造成的緩慢衰減遠在這個容差內，只有「明顯在加速」才會被擋下來。
+  const speed = state.hasGyro ? state.omega : mag;
+  calib.speedBuf.push(speed);
+  if (calib.speedBuf.length > 90) calib.speedBuf.shift();
+
+  if (calib.phase === 'spinup') {
+    const spun = mag > calib.stillMag + 0.25 && (!state.hasGyro || state.omega > 0.6);
+    if (!spun || calib.speedBuf.length < 90) {
+      setStatus('校正 2/3：現在把轉盤轉起來，維持同一個方向', 'warn');
+      return;
+    }
+    const lo = Math.min(...calib.speedBuf);
+    const hi = Math.max(...calib.speedBuf);
+    const mid = (lo + hi) / 2;
+    if (mid > 0 && (hi - lo) / mid < 0.06) {
+      calib.phase = 'collect';
+      calib.psi0 = state.psi;
+      calib.t0 = state.lastT;
+      calib.speed0 = speed;
+      calib.samples.length = 0;
+      calib.sumX = calib.sumY = 0;
+    } else {
+      setStatus(
+        `校正 2/3：轉速還在變（±${((hi - lo) / mid * 100).toFixed(0)}%），請維持等速`,
+        'warn',
+      );
+    }
+    return;
+  }
+
+  if (calib.phase === 'collect') {
+    // 取樣中途轉速變太多就重來，否則平均值會混到不同轉速的資料
+    if (calib.speed0 > 0 && Math.abs(speed - calib.speed0) / calib.speed0 > 0.15) {
+      calib.phase = 'spinup';
+      calib.samples.length = 0;
+      calib.sumX = calib.sumY = 0;
+      setStatus('校正 2/3：轉速變化太大，重新取樣。請維持等速', 'warn');
+      return;
+    }
+    calib.samples.push({ x: h.x, y: h.y });
+    calib.sumX += h.x;
+    calib.sumY += h.y;
+
+    const revs = (state.psi - calib.psi0) / TWO_PI;
+    const secs = state.lastT - calib.t0;
+    if (state.hasGyro) {
+      setStatus(
+        `校正 3/3：保持等速旋轉…已取樣 ${revs.toFixed(1)} / ${CALIB_REVS} 圈`,
+        'warn',
+      );
+      if (revs >= CALIB_REVS) finishCalibration();
+    } else {
+      setStatus(
+        `校正 3/3：保持等速旋轉…${secs.toFixed(1)} / ${CALIB_SECONDS_NO_GYRO} 秒（無陀螺儀）`,
+        'warn',
+      );
+      if (secs >= CALIB_SECONDS_NO_GYRO) finishCalibration();
+    }
+  }
+}
+
+// ---------------------------------------------------------------- 取樣
+
 function handleSample(raw, rotZdeg, t) {
   const dt = state.lastT ? Math.min(Math.max(t - state.lastT, 1e-3), 0.2) : 0.016;
   state.lastT = t;
   state.sampleCount++;
   state.hz += (1 / dt - state.hz) * 0.05;
-
   state.raw = raw;
 
-  // 1) 判斷正負號慣例。平放螢幕朝上時，規範下 z 應為 +9.8，iOS 為 −9.8。
-  //    慣例確定之前不能往下算，否則圓心方向會先被錯誤的正負號帶偏。
+  // 1) 正負號慣例：平放螢幕朝上時，規範下 z ≈ +9.8、iOS ≈ −9.8。
+  //    慣例確定之前不能往下算。
   state.gzLP += (raw.z - state.gzLP) * 0.05;
   if (Math.abs(state.gzLP) > 3) {
     state.signConv = state.gzLP > 0 ? 1 : -1;
@@ -142,168 +396,106 @@ function handleSample(raw, rotZdeg, t) {
   const s = state.signConv;
   const fz = s * raw.z;
 
-  // 傾斜角：平放且只有水平加速度時 f_z 恰好等於 g，傾斜 θ 度會讓 f_z = g·cosθ。
-  // 這是唯一能把「真的水平加速度」和「手機被拿歪」分開的線索 —— 水平分量
-  // 本身兩者看起來一模一樣。
+  // 2) 手機自身的傾斜角。f_z = g·cosθ，是唯一能把「真的水平加速度」
+  //    和「手機被拿歪」分開的線索。
   state.fzLP += (fz - state.fzLP) * 0.05;
   state.tiltDeg = Math.acos(Math.min(1, Math.max(-1, state.fzLP / G))) / DEG;
   state.level = state.tiltDeg < 10;
-  const level = state.level;
 
-  // 2) 水平分量。手機平放時重力只有 z 分量，所以 (x, y) 就是真實加速度的
-  //    水平分量，方向直接指向圓心。offX/offY 補掉桌面沒完全水平的殘留。
-  const h = { x: s * raw.x - state.offX, y: s * raw.y - state.offY };
+  // 3) 水平分量
+  const h = { x: s * raw.x, y: s * raw.y };
   state.h = h;
-  const hMag = Math.hypot(h.x, h.y);
+  state.hMag = Math.hypot(h.x, h.y);
 
-  // 3) 角速度：陀螺儀繞 z 軸的分量。
-  //    iOS 和 Android 的正負號慣例不保證一致，所以先留原始值，
-  //    再乘上自動判定出來的 gyroSign（見步驟 5）。
+  // 4) 角速度。只取大小，所以 iOS / Android 的正負號慣例都無所謂。
   if (rotZdeg !== null && rotZdeg !== undefined) {
     state.hasGyro = true;
-    const w = rotZdeg * DEG;
-    const prev = state.omegaRaw;
-    state.omegaRaw += (w - prev) * 0.25;
-    state.alphaRaw += ((state.omegaRaw - prev) / dt - state.alphaRaw) * 0.1;
-    state.omega = state.omegaRaw * state.gyroSign;
-    state.alpha = state.alphaRaw * state.gyroSign;
+    const w = Math.abs(rotZdeg * DEG);
+    state.omega += (w - state.omega) * 0.25;
   }
+  state.psi += state.omega * dt;
 
-  // 4) 旋轉方向：決定切線要指哪一邊
-  if (state.spinMode === 'auto') {
-    if (state.hasGyro && Math.abs(state.omega) > 0.25) {
-      state.spin = state.omega > 0 ? 1 : -1;
-    }
-  } else {
+  // 5) 旋轉方向：手動指定優先於校正結果
+  if (state.spinMode !== 'auto') {
     state.spin = state.spinMode === 'ccw' ? 1 : -1;
   }
 
-  // 5) 圓心方向。手機鎖在轉盤上，圓心方向在裝置座標中是固定的。
-  //
-  //    圓周運動的加速度是  h = r·[ ω²·ĉ + ω̇·rotate(ĉ, −90°) ]
-  //    也就是 h 的方向從 ĉ 偏了 φ = atan2(ω̇, ω²)（和半徑 r 無關）。
-  //    所以把 ĥ 轉回 +φ 就直接得到圓心方向 —— 轉盤在加速或煞車時，
-  //    圓心方向的估計也不會被切線分量帶歪。沒有陀螺儀時退回 φ = 0，
-  //    純靠低通慢慢收斂。
-  //
-  //    門檻只擋兩件事：訊號太小（方向是雜訊），以及手機沒放平（這時水平
-  //    分量幾乎都是重力洩漏，不是圓周運動）。不再要求 ω 超過某個值 ——
-  //    轉得慢一樣要能看，慢只是箭頭短而已。
-  const usable = hMag > 0.08 && level;
-  if (usable) {
-    // ω 很小的時候 φ = atan2(ω̇, ω²) 會發散（分母趨近 0），此時不修正
-    const w2 = state.omega * state.omega;
-    const phi = state.hasGyro && w2 > 1 ? Math.atan2(state.alpha, w2) : 0;
-    const cs = Math.cos(phi);
-    const sn = Math.sin(phi);
-    const u = {
-      x: (h.x * cs - h.y * sn) / hMag,
-      y: (h.x * sn + h.y * cs) / hMag,
-    };
-    // 陀螺儀正負號慣例的自動判定。
-    //
-    // 參考方向 cRef 只在「等速」時更新 —— 這時 φ ≈ 0，ĥ 就直接等於 ĉ，
-    // 而且和陀螺儀的正負號假設無關，所以是乾淨的參考。轉速在變的時候凍結，
-    // 否則起轉階段 ĥ 幾乎全是切線分量，參考方向會被帶歪而投出錯誤的票。
-    //
-    // 有了乾淨的 ĉ 之後：ĉ = rotate(ĥ, +φ) 表示「從 ĥ 轉到 ĉ 要轉 φ」，
-    // 所以實際夾角 ψ = angle(ĥ → cRef) 應該和陀螺儀預測的 φ 同號。
-    // 異號就表示陀螺儀的正負號慣例和我們假設的相反。
-    // 等速時 φ ≈ 0，兩種假設在數學上無從分辨，這時不投票。
-    const hx = h.x / hMag;
-    const hy = h.y / hMag;
-    const steadySpeed = Math.abs(phi) < 0.05;
-    if (!state.cRef) {
-      state.cRef = { x: hx, y: hy };
-    } else if (steadySpeed) {
-      const rx = state.cRef.x + (hx - state.cRef.x) * 0.05;
-      const ry = state.cRef.y + (hy - state.cRef.y) * 0.05;
-      const rn = Math.hypot(rx, ry) || 1;
-      state.cRef = { x: rx / rn, y: ry / rn };
-      state.cRefSteady++;
-    }
-
-    // 參考方向還沒在等速中收斂過就不投票 —— 寧可不判斷，也不要判斷錯
-    if (state.hasGyro && !state.centerLocked
-        && state.cRefSteady > 60 && Math.abs(phi) > 0.08) {
-      const psi = Math.atan2(
-        hx * state.cRef.y - hy * state.cRef.x,
-        hx * state.cRef.x + hy * state.cRef.y,
-      );
-      if (Math.abs(psi) > 0.05) {
-        // 同號加分、異號扣分，權重取兩者較小的角度以免被雜訊放大
-        state.gyroVote += Math.sign(phi * psi) * Math.min(Math.abs(phi), Math.abs(psi));
-        state.gyroVote = Math.min(30, Math.max(-30, state.gyroVote));
-        // 翻過越多次門檻越高，避免在雜訊裡來回跳
-        if (state.gyroVote < -4 * (1 + state.gyroFlips) && state.gyroFlips < 4) {
-          state.gyroSign *= -1;
-          state.gyroFlips++;
-          state.gyroVote = 0;
-        }
-      }
-    }
-
-    const flipped = state.cHat && u.x * state.cHat.x + u.y * state.cHat.y < 0;
-    if (!state.cHat || (flipped && !state.centerLocked)) {
-      // 幾乎反向時低通會卡在反方向（正規化後是個不動點），直接翻過去
-      state.cHat = u;
-    } else if (!state.centerLocked) {
-      // 訊號越弱收斂越慢，避免雜訊把方向甩來甩去
-      const k = (state.hasGyro ? 0.06 : 0.02) * Math.min(1, Math.max(0.15, hMag));
-      const cx = state.cHat.x + (u.x - state.cHat.x) * k;
-      const cy = state.cHat.y + (u.y - state.cHat.y) * k;
-      const n = Math.hypot(cx, cy) || 1;
-      state.cHat = { x: cx / n, y: cy / n };
+  // 6) 校正流程
+  if (calib.active) {
+    if (!state.level) {
+      setStatus(`校正中斷：手機傾斜 ${state.tiltDeg.toFixed(1)}°，請放平`, 'err');
+    } else {
+      stepCalibration(dt);
     }
   }
 
-  // 6) 分解成向心與切線分量
+  // 7) 分解。校正過就用鎖定的方向；沒校正過就退回慢速低通（時間常數
+  //    刻意拉到一圈以上，否則洩漏會把方向帶著跑）。
+  if (!state.calibrated && state.level && state.hMag > 0.08 && !calib.active) {
+    const u = norm(h.x, h.y);
+    if (!state.cHat) {
+      state.cHat = u;
+    } else {
+      const period = state.hasGyro && state.omega > 0.3 ? TWO_PI / state.omega : 2.5;
+      const k = Math.min(0.5, dt / Math.max(period, 1.0));
+      const c = norm(
+        state.cHat.x + (u.x - state.cHat.x) * k,
+        state.cHat.y + (u.y - state.cHat.y) * k,
+      );
+      state.cHat = c;
+    }
+  }
+
   if (state.cHat) {
     const c = state.cHat;
-    // ω > 0（從螢幕上方往下看為逆時針）時 t̂ = (ĉy, −ĉx)
-    const tHat = state.spin > 0
-      ? { x: c.y, y: -c.x }
-      : { x: -c.y, y: c.x };
+    const tHat = tangentOf(c, state.spin);
     state.ac = h.x * c.x + h.y * c.y;
     state.at = h.x * tHat.x + h.y * tHat.y;
+    pushRevolution(state.ac, state.at, state.omega, state.omega * dt, dt);
   }
 
-  // 7) 狀態：把「為什麼沒有反應」直接講出來
-  if (state.mode === 'demo') {
-    setStatus('示範模式：模擬轉盤加速 → 等速 → 煞車', 'warn');
-  } else if (state.mode === 'sensor') {
-    if (!level) {
-      setStatus(
-        `手機沒有平放（傾斜 ${state.tiltDeg.toFixed(1)}°，重力洩漏約 ` +
-        `${(G * Math.sin(state.tiltDeg * DEG)).toFixed(1)} m/s²）—— 此時讀到的` +
-        `是重力不是圓周運動`,
-        'err',
-      );
-    } else if (hMag < 0.08) {
-      setStatus('已平放，但水平加速度幾乎是 0：轉盤要轉，而且手機不能放在圓心上', 'warn');
-    } else {
-      setStatus(
-        state.hasGyro ? '量測中' : '量測中（無陀螺儀，請手動選旋轉方向）',
-        state.hasGyro ? 'ok' : 'warn',
-      );
+  // 8) 狀態訊息
+  if (!calib.active) {
+    if (state.mode === 'demo') {
+      setStatus('示範模式：模擬轉盤加速 → 等速 → 煞車（含 2° 桌面傾斜）', 'warn');
+    } else if (state.mode === 'sensor') {
+      if (!state.level) {
+        setStatus(
+          `手機沒有平放（傾斜 ${state.tiltDeg.toFixed(1)}°，重力洩漏約 ` +
+          `${(G * Math.sin(state.tiltDeg * DEG)).toFixed(1)} m/s²）—— 讀到的是重力不是圓周運動`,
+          'err',
+        );
+      } else if (state.hMag < 0.08) {
+        setStatus('已平放，但水平加速度幾乎是 0：轉盤要轉，而且手機不能放在圓心上', 'warn');
+      } else if (!state.calibrated) {
+        setStatus('量測中（未校正）—— 按「校正方向」可鎖定圓心方向並消除桌面傾斜的影響', 'warn');
+      } else {
+        setStatus('量測中（已校正）', 'ok');
+      }
     }
   }
 
-  // 8) 記錄
-  chartData.push({ t, ac: state.ac, at: state.at, w: state.omega });
+  // 9) 記錄
+  chartData.push({ t, ac: state.acAvg, at: state.atAvg, w: state.omega });
   while (chartData.length && t - chartData[0].t > CHART_SPAN) chartData.shift();
   if (csvRows.length < CSV_LIMIT) {
-    csvRows.push([t, raw.x, raw.y, raw.z, h.x, h.y, state.ac, state.at, state.omega]);
+    csvRows.push([t, raw.x, raw.y, raw.z, h.x, h.y,
+      state.ac, state.at, state.acAvg, state.atAvg, state.omega]);
     if (csvRows.length === 1) els.btnCsv.disabled = false;
   }
 }
 
-/** 半徑與線速度：a_c = ω²r */
+/**
+ * 半徑與線速度：a_c = ω²r。
+ * a_c 是「最近一整圈」的平均，所以 ω 也要取同一個窗的平均，否則轉速在變的
+ * 時候會拿到不同時刻的量去相除，半徑會爆掉。
+ */
 function derived() {
-  const w = Math.abs(state.omega);
-  const r = w > 0.35 ? state.ac / (w * w) : NaN;
-  const v = Number.isFinite(r) ? w * r : NaN;
-  return { w, r, v };
+  const wAvg = state.omegaAvg;
+  // a_c 必須是正的才有物理意義（向心永遠指向圓心），否則就是還沒轉起來
+  const r = wAvg > 0.35 && state.acAvg > 0.02 ? state.acAvg / (wAvg * wAvg) : NaN;
+  const v = Number.isFinite(r) ? wAvg * r : NaN;
+  return { w: state.omega, r, v };
 }
 
 // ---------------------------------------------------------------- 感測器
@@ -322,7 +514,6 @@ async function startSensor() {
       return false;
     }
     if (res !== 'granted') {
-      // iOS 還有一個系統層的總開關，關掉的話這裡一定回 denied
       setStatus(
         '沒有取得動作感測器權限。iOS 請到「設定 → Safari → 動作與方向存取」打開，' +
         '再重新載入頁面',
@@ -332,8 +523,6 @@ async function startSensor() {
     }
   }
   window.addEventListener('devicemotion', onDeviceMotion);
-
-  // 有些瀏覽器需要 HTTPS 才會送出事件；三秒內沒資料就提示
   setTimeout(() => {
     if (state.running && state.mode === 'sensor' && state.sampleCount === 0) {
       setStatus('收不到感測器資料，請確認使用 HTTPS 開啟，或改用示範模式', 'err');
@@ -355,38 +544,44 @@ function onDeviceMotion(e) {
 
 // ---------------------------------------------------------------- 示範模式
 
-const demo = { w: 0, t: 0, cx: Math.sin(28 * DEG), cy: Math.cos(28 * DEG) };
+const demo = { w: 0, t: 0, psi: 0, tilt: 2 * DEG, cx: Math.sin(28 * DEG), cy: Math.cos(28 * DEG) };
 
 function demoSample(t) {
   const dt = demo.t ? Math.min(Math.max(t - demo.t, 1e-3), 0.1) : 0.016;
   demo.t = t;
 
-  // 轉速先加速、再等速、再煞車，用來看綠色箭頭何時出現
-  const cycle = t % 18;
+  const cycle = t % 26;
   let target;
-  if (cycle < 5) target = 1.2 * (cycle / 5);
-  else if (cycle < 13) target = 1.2;
-  else target = 1.2 * Math.max(0, 1 - (cycle - 13) / 3);
-  target *= 2 * Math.PI; // rad/s
+  if (cycle < 4) target = 0;              // 靜止，讓校正抓得到
+  else if (cycle < 9) target = 1.2 * ((cycle - 4) / 5);
+  else if (cycle < 21) target = 1.2;
+  else target = 1.2 * Math.max(0, 1 - (cycle - 21) / 3);
+  target *= TWO_PI;
 
   const prev = demo.w;
   demo.w += (target - demo.w) * Math.min(1, dt * 1.5);
+  demo.psi += demo.w * dt;
   const alpha = (demo.w - prev) / dt;
   const r = 0.25;
 
-  const c = { x: demo.cx, y: demo.cy };           // 圓心方向
-  const tHat = { x: c.y, y: -c.x };               // 逆時針的切線方向
+  const c = { x: demo.cx, y: demo.cy };
+  const tHat = { x: c.y, y: -c.x };           // 逆時針
   const ac = demo.w * demo.w * r;
   const at = alpha * r;
-  const n = () => (Math.random() - 0.5) * 0.06;
+
+  // 桌面傾斜造成的重力洩漏：在裝置座標中以 −ψ 旋轉
+  const leak = G * Math.sin(demo.tilt);
+  const lx = leak * Math.cos(-demo.psi);
+  const ly = leak * Math.sin(-demo.psi);
+  const n = () => (Math.random() - 0.5) * 0.05;
 
   handleSample(
     {
-      x: ac * c.x + at * tHat.x + n(),
-      y: ac * c.y + at * tHat.y + n(),
-      z: G + n(),
+      x: ac * c.x + at * tHat.x + lx + n(),
+      y: ac * c.y + at * tHat.y + ly + n(),
+      z: G * Math.cos(demo.tilt) + n(),
     },
-    (demo.w / DEG) + n(),
+    demo.w / DEG + n(),
     t,
   );
 }
@@ -414,9 +609,8 @@ function updateRange() {
     state.range = parseFloat(state.rangeMode);
     return;
   }
-  const peak = Math.max(Math.abs(state.ac), Math.abs(state.at), 0.3) * 1.3;
+  const peak = Math.max(Math.abs(state.acAvg), Math.abs(state.atAvg), state.hMag, 0.3) * 1.3;
   const want = RANGE_LADDER.find((v) => v >= peak) ?? 100;
-  // 只在需要時才跳檔，避免數字一直抖
   if (want > state.range || peak < state.range * 0.35) state.range = want;
 }
 
@@ -430,7 +624,7 @@ function arrow(ctx, x0, y0, x1, y1, color, width) {
   ctx.lineJoin = 'round';
   if (len < 4) {
     ctx.beginPath();
-    ctx.arc(x0, y0, width * 0.7, 0, Math.PI * 2);
+    ctx.arc(x0, y0, width * 0.7, 0, TWO_PI);
     ctx.fill();
     return;
   }
@@ -456,16 +650,14 @@ function arrow(ctx, x0, y0, x1, y1, color, width) {
 function drawPhone(ctx, cx, cy, size) {
   const w = size * 0.23;
   const h = size * 0.45;
-  const r = w * 0.16;
   ctx.save();
   ctx.lineWidth = 2;
   ctx.strokeStyle = '#39405a';
   ctx.fillStyle = 'rgba(30, 36, 54, .55)';
   ctx.beginPath();
-  ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r);
+  ctx.roundRect(cx - w / 2, cy - h / 2, w, h, w * 0.16);
   ctx.fill();
   ctx.stroke();
-  // 聽筒：標示手機的「上方」
   ctx.fillStyle = '#4a536e';
   ctx.beginPath();
   ctx.roundRect(cx - w * 0.14, cy - h / 2 + h * 0.045, w * 0.28, 3, 2);
@@ -473,16 +665,13 @@ function drawPhone(ctx, cx, cy, size) {
   ctx.restore();
 }
 
-/** 角落的小座標軸：顯示裝置的 +X / +Y 在畫面上的實際指向。 */
 function drawAxisGizmo(ctx, gx, gy) {
   const L = 16;
-  const ax = toScreen({ x: 1, y: 0 });
-  const ay = toScreen({ x: 0, y: 1 });
   ctx.save();
   ctx.font = '9px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  for (const [v, label] of [[ax, '+X'], [ay, '+Y']]) {
+  for (const [v, label] of [[toScreen({ x: 1, y: 0 }), '+X'], [toScreen({ x: 0, y: 1 }), '+Y']]) {
     arrow(ctx, gx, gy, gx + v.x * L, gy - v.y * L, '#46506b', 1.5);
     ctx.fillStyle = '#5d6577';
     ctx.fillText(label, gx + v.x * (L + 9), gy - v.y * (L + 9));
@@ -490,17 +679,18 @@ function drawAxisGizmo(ctx, gx, gy) {
   ctx.restore();
 }
 
-/** 把文字畫在畫布內，貼邊時自動往內縮。 */
 function labelAt(ctx, x, y, text, color, w, h) {
   ctx.save();
   ctx.font = '11px system-ui, sans-serif';
   ctx.fillStyle = color;
   ctx.textBaseline = 'middle';
   const tw = ctx.measureText(text).width;
-  const cx2 = Math.min(Math.max(x, tw / 2 + 6), w - tw / 2 - 6);
-  const cy2 = Math.min(Math.max(y, 12), h - 12);
   ctx.textAlign = 'center';
-  ctx.fillText(text, cx2, cy2);
+  ctx.fillText(
+    text,
+    Math.min(Math.max(x, tw / 2 + 6), w - tw / 2 - 6),
+    Math.min(Math.max(y, 12), h - 12),
+  );
   ctx.restore();
 }
 
@@ -516,21 +706,18 @@ function drawView() {
   ctx.fillRect(0, 0, w, h);
 
   updateRange();
-  const k = R / state.range; // px per (m/s²)
+  const k = R / state.range;
 
-  // 刻度圈
   ctx.save();
   ctx.font = '10px system-ui, sans-serif';
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
   for (const frac of [0.25, 0.5, 0.75, 1]) {
     ctx.beginPath();
-    ctx.arc(cx, cy, R * frac, 0, Math.PI * 2);
+    ctx.arc(cx, cy, R * frac, 0, TWO_PI);
     ctx.strokeStyle = frac === 1 ? '#2f3648' : '#222838';
     ctx.lineWidth = 1;
     ctx.stroke();
     if (frac === 0.5 || frac === 1) {
-      // 標在左上對角線上，避開手機外框與右上角的旋轉方向指示
       const d = R * frac * 0.707;
       ctx.fillStyle = '#5d6577';
       ctx.fillText(`${+(state.range * frac).toFixed(2)}`, cx - d, cy - d);
@@ -543,15 +730,13 @@ function drawView() {
   drawPhone(ctx, cx, cy, size);
   drawAxisGizmo(ctx, 26, h - 30);
 
-  // 量到的水平合成向量。不管有沒有取得圓心方向都畫，讓人一眼看出程式活著、
-  // 而且看得到紅綠兩個分量是從哪一個向量拆出來的。
+  // 瞬時的水平合成向量（含重力洩漏），讓人看得到原始訊號在動
   const hS = toScreen(state.h);
   const hMag = Math.hypot(hS.x, hS.y);
   if (hMag > 0.02) {
     const hLen = Math.min(hMag * k, R);
-    arrow(ctx, cx, cy,
-      cx + (hS.x / hMag) * hLen, cy - (hS.y / hMag) * hLen,
-      'rgba(190,200,220,.45)', 3);
+    arrow(ctx, cx, cy, cx + (hS.x / hMag) * hLen, cy - (hS.y / hMag) * hLen,
+      'rgba(190,200,220,.4)', 3);
   }
 
   if (!state.cHat) {
@@ -559,26 +744,20 @@ function drawView() {
     ctx.fillStyle = '#5d6577';
     ctx.font = '12px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(
-      hMag > 0.02 ? '訊號太弱或手機沒放平，尚未取得圓心方向' : '轉動轉盤以取得圓心方向…',
-      cx, cy + R + 22);
+    ctx.fillText('轉動轉盤以取得圓心方向…', cx, cy + R + 22);
     ctx.restore();
     return;
   }
 
   const c = toScreen(state.cHat);
-  const tHat = state.spin > 0
-    ? { x: state.cHat.y, y: -state.cHat.x }
-    : { x: -state.cHat.y, y: state.cHat.x };
-  const tS = toScreen(tHat);
+  const tS = toScreen(tangentOf(state.cHat, state.spin));
 
-  // 圓周軌跡：以 ĉ 方向為圓心畫一段通過手機的圓弧，並標出前進方向。
-  // 半徑只是示意（實際 r 會變），重點是讓畫面和真實的轉盤幾何對得上。
+  // 圓周軌跡
   {
     const Ro = R * 0.78;
     const ox = cx + c.x * Ro;
     const oy = cy - c.y * Ro;
-    const a0 = Math.atan2(cy - oy, cx - ox); // 手機在軌跡上的角度
+    const a0 = Math.atan2(cy - oy, cx - ox);
     ctx.save();
     ctx.setLineDash([5, 6]);
     ctx.strokeStyle = 'rgba(140,152,180,.4)';
@@ -587,19 +766,17 @@ function drawView() {
     ctx.arc(ox, oy, Ro, a0 - 1.15, a0 + 1.15);
     ctx.stroke();
     ctx.setLineDash([]);
-    // 前進方向的小箭頭，畫在手機前方一點的軌跡上
     const ahead = a0 + (state.spin > 0 ? -0.75 : 0.75);
     const px = ox + Math.cos(ahead) * Ro;
     const py = oy + Math.sin(ahead) * Ro;
-    const tang = state.spin > 0
+    const tg = state.spin > 0
       ? { x: Math.sin(ahead), y: -Math.cos(ahead) }
       : { x: -Math.sin(ahead), y: Math.cos(ahead) };
-    arrow(ctx, px - tang.x * 8, py - tang.y * 8,
-      px + tang.x * 10, py + tang.y * 10, 'rgba(140,152,180,.75)', 2.5);
+    arrow(ctx, px - tg.x * 8, py - tg.y * 8, px + tg.x * 10, py + tg.y * 10,
+      'rgba(140,152,180,.75)', 2.5);
     ctx.restore();
   }
 
-  // 軸線：紅色指向圓心、綠色為切線軸
   ctx.save();
   ctx.setLineDash([4, 5]);
   ctx.lineWidth = 1;
@@ -615,29 +792,18 @@ function drawView() {
   ctx.stroke();
   ctx.restore();
 
-  // 「圓心」標記
-  labelAt(ctx, cx + c.x * (R + 16), cy - c.y * (R + 16), '圓心',
-    'rgba(255,77,85,.8)', w, h);
+  labelAt(ctx, cx + c.x * (R + 16), cy - c.y * (R + 16), '圓心', 'rgba(255,77,85,.8)', w, h);
 
-  const clampLen = (a) => Math.min(Math.abs(a) * k, R);
-
-  // 沒放平的時候水平分量主要是重力洩漏，分解出來的紅綠分量沒有物理意義，
-  // 所以畫淡並蓋上警告，不要讓人誤讀。
   if (!state.level) ctx.globalAlpha = 0.22;
 
-  // 綠色：切線分量（先畫，讓紅色疊在上面）
-  const atLen = clampLen(state.at);
-  const tSign = state.at >= 0 ? 1 : -1;
-  arrow(ctx, cx, cy,
-    cx + tS.x * atLen * tSign, cy - tS.y * atLen * tSign,
-    '#3ddc84', 5);
+  const clampLen = (a) => Math.min(Math.abs(a) * k, R);
+  const atLen = clampLen(state.atAvg);
+  const tSign = state.atAvg >= 0 ? 1 : -1;
+  arrow(ctx, cx, cy, cx + tS.x * atLen * tSign, cy - tS.y * atLen * tSign, '#3ddc84', 5);
 
-  // 紅色：向心分量
-  const acLen = clampLen(state.ac);
-  const cSign = state.ac >= 0 ? 1 : -1;
-  arrow(ctx, cx, cy,
-    cx + c.x * acLen * cSign, cy - c.y * acLen * cSign,
-    '#ff4d55', 6);
+  const acLen = clampLen(state.acAvg);
+  const cSign = state.acAvg >= 0 ? 1 : -1;
+  arrow(ctx, cx, cy, cx + c.x * acLen * cSign, cy - c.y * acLen * cSign, '#ff4d55', 6);
 
   ctx.globalAlpha = 1;
   if (!state.level) {
@@ -661,7 +827,6 @@ function drawView() {
   const ry = rr + 14;
   ctx.strokeStyle = '#5aa9ff';
   ctx.lineWidth = 2;
-  // canvas 角度隨順時針增加，所以螢幕上的逆時針 = anticlockwise: true
   const ccw = state.spin > 0;
   const a0 = ccw ? 1.55 * Math.PI : 0.25 * Math.PI;
   const endA = ccw ? 0.25 * Math.PI : 1.55 * Math.PI;
@@ -677,16 +842,16 @@ function drawView() {
   ctx.font = '10px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(state.spin > 0 ? '逆時針' : '順時針', rx, ry);
+  ctx.fillText(ccw ? '逆時針' : '順時針', rx, ry);
   ctx.restore();
 
-  if (state.centerLocked) {
-    ctx.save();
-    ctx.fillStyle = '#c9a227';
-    ctx.font = '10px system-ui, sans-serif';
-    ctx.fillText('圓心方向已鎖定', 12, 20);
-    ctx.restore();
-  }
+  ctx.save();
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.fillStyle = state.calibrated ? '#3ddc84' : '#c9a227';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(state.calibrated ? '已校正・方向鎖定' : '未校正・方向估計中', 12, 20);
+  ctx.restore();
 }
 
 function drawChart() {
@@ -694,15 +859,11 @@ function drawChart() {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = '#10131b';
   ctx.fillRect(0, 0, w, h);
-
   if (chartData.length < 2) return;
 
   const t1 = chartData[chartData.length - 1].t;
   const t0 = t1 - CHART_SPAN;
-  const aMax = Math.max(
-    1,
-    ...chartData.map((d) => Math.max(Math.abs(d.ac), Math.abs(d.at))),
-  ) * 1.15;
+  const aMax = Math.max(1, ...chartData.map((d) => Math.max(Math.abs(d.ac), Math.abs(d.at)))) * 1.15;
   const wMax = Math.max(1, ...chartData.map((d) => Math.abs(d.w))) * 1.15;
 
   const X = (t) => ((t - t0) / CHART_SPAN) * w;
@@ -716,18 +877,16 @@ function drawChart() {
   ctx.lineTo(w, h / 2);
   ctx.stroke();
 
-  const series = [
+  for (const [key, Y, color, lw] of [
     ['w', Yw, 'rgba(90,169,255,.55)', 1.5],
     ['at', Ya, '#3ddc84', 2],
     ['ac', Ya, '#ff4d55', 2],
-  ];
-  for (const [key, Y, color, lw] of series) {
+  ]) {
     ctx.beginPath();
     chartData.forEach((d, i) => {
       const x = X(d.t);
       const y = Y(d[key]);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.strokeStyle = color;
     ctx.lineWidth = lw;
@@ -742,17 +901,18 @@ function drawChart() {
   ctx.fillText(`${CHART_SPAN}s`, 4, h - 4);
 }
 
-// 頂部的 Minecraft 羅盤：指針指向圓心方向
 let compassCtx = null;
 let compassImage = null;
+let compassOff = null;
 
 function drawCompass() {
   if (!compassCtx) {
     compassCtx = els.compass.getContext('2d');
     compassCtx.imageSmoothingEnabled = false;
     compassImage = compassCtx.createImageData(COMPASS_BASE_SIZE, COMPASS_BASE_SIZE);
+    compassOff = document.createElement('canvas');
+    compassOff.width = compassOff.height = COMPASS_BASE_SIZE;
   }
-  // 預設朝上；有圓心方向時指過去（canvas y 向下，所以 y 取負）
   let dx = 0;
   let dy = -1;
   if (state.cHat) {
@@ -761,14 +921,9 @@ function drawCompass() {
     dy = -c.y;
   }
   compassImage.data.set(renderCompass(dx, dy));
-  const off = drawCompass.off ??= (() => {
-    const cv = document.createElement('canvas');
-    cv.width = cv.height = COMPASS_BASE_SIZE;
-    return cv;
-  })();
-  off.getContext('2d').putImageData(compassImage, 0, 0);
+  compassOff.getContext('2d').putImageData(compassImage, 0, 0);
   compassCtx.clearRect(0, 0, els.compass.width, els.compass.height);
-  compassCtx.drawImage(off, 0, 0, els.compass.width, els.compass.height);
+  compassCtx.drawImage(compassOff, 0, 0, els.compass.width, els.compass.height);
 }
 
 // ---------------------------------------------------------------- 主迴圈
@@ -777,27 +932,30 @@ const fmt = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '–');
 
 function updateReadouts() {
   const { w, r, v } = derived();
-  els.rdAc.textContent = fmt(state.ac);
-  els.rdAt.textContent = fmt(state.at);
-  els.rdRpm.textContent = state.hasGyro ? fmt((w * 60) / (2 * Math.PI), 1) : '–';
+  els.rdAc.textContent = fmt(state.acAvg);
+  els.rdAt.textContent = fmt(state.atAvg);
+  els.rdRpm.textContent = state.hasGyro ? fmt((w * 60) / TWO_PI, 1) : '–';
   els.rdR.textContent = fmt(r, 3);
   els.rdV.textContent = fmt(v);
-  const hMag = Math.hypot(state.h.x, state.h.y);
-  els.rdAh.textContent = fmt(hMag);
+  els.rdAh.textContent = fmt(state.hMag);
 
   els.sbRate.textContent = `${state.hz.toFixed(0)} Hz`;
   els.sbGyro.innerHTML = state.hasGyro
-    ? `陀螺儀 <span class="good">✓</span>${state.gyroSign < 0 ? ' <span class="bad">(已翻轉)</span>' : ''}`
+    ? '陀螺儀 <span class="good">✓</span>'
     : '陀螺儀 <span class="bad">✗</span>';
   const tiltBad = state.tiltDeg >= 10;
-  els.sbTilt.innerHTML = `傾斜 <span class="${tiltBad ? 'bad' : 'good'}">` +
-    `${state.tiltDeg.toFixed(1)}°</span>`;
-  els.sbMag.textContent = `|a_h| ${fmt(hMag)}`;
+  els.sbTilt.innerHTML =
+    `手機 <span class="${tiltBad ? 'bad' : 'good'}">${state.tiltDeg.toFixed(1)}°</span>`;
+  els.sbLeak.innerHTML = state.calibrated
+    ? `轉盤 <span class="${state.tableTiltDeg > 3 ? 'bad' : 'good'}">` +
+      `${state.tableTiltDeg.toFixed(1)}°</span> (±${state.leakAmp.toFixed(2)})`
+    : '轉盤 <span class="dim">未校正</span>';
+
   els.sensorInfo.textContent =
     `${BUILD} · ${state.sampleCount} 筆 · ${state.hz.toFixed(0)} Hz · ` +
     `慣例 ${state.signConv > 0 ? '規範(+z)' : 'iOS(−z)'} · ` +
     `螢幕 ${screen.orientation?.angle ?? 0}° · ` +
-    `ax ${fmt(state.raw.x, 1)} ay ${fmt(state.raw.y, 1)} az ${fmt(state.raw.z, 1)}`;
+    `平均窗 ${state.hasGyro ? '1 圈' : `${LIVE_SECONDS_NO_GYRO}s`}`;
 }
 
 function loop() {
@@ -824,11 +982,26 @@ async function keepAwake(on) {
   } catch { /* 沒有就算了 */ }
 }
 
+function resetEstimators() {
+  state.gzLP = 0;
+  state.fzLP = 0;
+  state.convReady = false;
+  state.omega = 0;
+  state.psi = 0;
+  state.cHat = null;
+  state.calibrated = false;
+  state.ac = state.at = 0;
+  state.leakAmp = 0;
+  state.tableTiltDeg = 0;
+  resetRevolution();
+  stopCalibration();
+}
+
 function setRunning(on, mode) {
   state.running = on;
   state.mode = on ? mode : null;
-  els.btnTare.disabled = !on;
-  els.btnLock.disabled = !on;
+  els.btnCalib.disabled = !on;
+  els.btnClear.disabled = !on;
   els.btnStart.textContent = on && mode === 'sensor' ? '停止' : '開始測量';
   els.btnStart.classList.toggle('stop', on && mode === 'sensor');
   els.btnDemo.classList.toggle('on', on && mode === 'demo');
@@ -856,51 +1029,27 @@ els.btnDemo.addEventListener('click', () => {
   }
   window.removeEventListener('devicemotion', onDeviceMotion);
   resetEstimators();
-  state.offX = state.offY = 0;
+  demo.w = demo.t = demo.psi = 0;
   setRunning(true, 'demo');
-  setStatus('示範模式：模擬轉盤加速 → 等速 → 煞車', 'warn');
 });
 
-function resetEstimators() {
-  state.gzLP = 0;
-  state.fzLP = 0;
-  state.convReady = false;
-  state.gyroSign = 1;
-  state.gyroVote = 0;
-  state.gyroFlips = 0;
-  state.cRef = null;
-  state.cRefSteady = 0;
-  state.omegaRaw = 0;
-  state.alphaRaw = 0;
-  state.omega = 0;
-  state.alpha = 0;
-  state.cHat = null;
-  state.centerLocked = false;
-  state.ac = 0;
-  state.at = 0;
-  els.btnLock.textContent = '鎖定圓心方向';
-  els.btnLock.classList.remove('on');
-}
-
-els.btnTare.addEventListener('click', () => {
-  if (!state.convReady) {
-    setStatus('還在判斷座標慣例，稍等一下再按', 'warn');
-    return;
+els.btnCalib.addEventListener('click', () => {
+  if (calib.active) {
+    stopCalibration();
+    setStatus('已取消校正');
+  } else {
+    startCalibration();
   }
-  const s = state.signConv;
-  state.offX = s * state.raw.x;
-  state.offY = s * state.raw.y;
-  state.cHat = null;
-  state.centerLocked = false;
-  els.btnLock.textContent = '鎖定圓心方向';
-  els.btnLock.classList.remove('on');
-  setStatus('已歸零校正', 'ok');
 });
 
-els.btnLock.addEventListener('click', () => {
-  state.centerLocked = !state.centerLocked;
-  els.btnLock.textContent = state.centerLocked ? '解除鎖定' : '鎖定圓心方向';
-  els.btnLock.classList.toggle('on', state.centerLocked);
+els.btnClear.addEventListener('click', () => {
+  state.calibrated = false;
+  state.cHat = null;
+  state.leakAmp = 0;
+  state.tableTiltDeg = 0;
+  resetRevolution();
+  stopCalibration();
+  setStatus('已清除校正，回到自動估計');
 });
 
 els.selSpin.addEventListener('change', (e) => {
@@ -908,12 +1057,10 @@ els.selSpin.addEventListener('change', (e) => {
   if (state.spinMode !== 'auto') state.spin = state.spinMode === 'ccw' ? 1 : -1;
 });
 
-els.selRange.addEventListener('change', (e) => {
-  state.rangeMode = e.target.value;
-});
+els.selRange.addEventListener('change', (e) => { state.rangeMode = e.target.value; });
 
 els.btnCsv.addEventListener('click', () => {
-  const header = 't_s,ax,ay,az,ah_x,ah_y,a_c,a_t,omega_rad_s\n';
+  const header = 't_s,ax,ay,az,ah_x,ah_y,a_c,a_t,a_c_avg,a_t_avg,omega_rad_s\n';
   const body = csvRows
     .map((r) => r.map((v) => (typeof v === 'number' ? v.toFixed(5) : v)).join(','))
     .join('\n');

@@ -31,20 +31,20 @@
     <div class="sensorbar" id="sensorBar">
       <span id="sbRate">— Hz</span>
       <span id="sbGyro">陀螺儀 —</span>
-      <span id="sbTilt">傾斜 —</span>
-      <span id="sbMag">|a<sub>h</sub>| —</span>
+      <span id="sbTilt">手機 —</span>
+      <span id="sbLeak">轉盤 —</span>
     </div>
     <canvas id="view" class="view"></canvas>
     <div class="legend">
       <span><i class="swatch red"></i>向心 a<sub>c</sub>（指向圓心）</span>
       <span><i class="swatch green"></i>切線 a<sub>t</sub>（沿速度方向）</span>
-      <span><i class="swatch grey"></i>量到的水平合成向量</span>
+      <span><i class="swatch grey"></i>瞬時水平合成（含重力洩漏）</span>
     </div>
   </section>
 
   <section class="readouts" id="readouts">
-    <div class="cell"><span class="k">向心 a<sub>c</sub></span><span class="v" id="rdAc">–</span><span class="u">m/s²</span></div>
-    <div class="cell"><span class="k">切線 a<sub>t</sub></span><span class="v" id="rdAt">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k">向心 a<sub>c</sub>（每圈平均）</span><span class="v" id="rdAc">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k">切線 a<sub>t</sub>（每圈平均）</span><span class="v" id="rdAt">–</span><span class="u">m/s²</span></div>
     <div class="cell"><span class="k">角速度 ω</span><span class="v" id="rdRpm">–</span><span class="u">rpm</span></div>
     <div class="cell"><span class="k">半徑 r</span><span class="v" id="rdR">–</span><span class="u">m</span></div>
     <div class="cell"><span class="k">線速度 v</span><span class="v" id="rdV">–</span><span class="u">m/s</span></div>
@@ -53,8 +53,8 @@
 
   <section class="controls">
     <button id="btnStart" class="btn primary">開始測量</button>
-    <button id="btnTare" class="btn" disabled>歸零校正</button>
-    <button id="btnLock" class="btn" disabled>鎖定圓心方向</button>
+    <button id="btnCalib" class="btn" disabled>校正方向</button>
+    <button id="btnClear" class="btn" disabled>清除校正</button>
     <button id="btnDemo" class="btn ghost">示範模式</button>
   </section>
 
@@ -94,30 +94,44 @@
   <details class="help">
     <summary>使用方式與原理</summary>
     <ol>
-      <li>手機<strong>螢幕朝上平放</strong>在旋轉桌上，用膠帶或夾具固定，不要讓它滑動。</li>
-      <li><strong>手機要放在遠離圓心的位置</strong>。向心加速度是 a<sub>c</sub> = ω²r，放在圓心上 r = 0，不管轉多快都量不到東西。盡量靠轉盤外緣。</li>
-      <li><strong>轉盤要轉得夠快。</strong>r = 10 cm 時，10 rpm 只有 0.11 m/s²，30 rpm 才有 0.99 m/s²，60 rpm 有 3.9 m/s²。轉速加倍，讀值變成四倍。</li>
-      <li>轉盤靜止時按 <strong>歸零校正</strong>，扣掉桌面沒有完全水平造成的重力分量。</li>
-      <li>按 <strong>開始測量</strong> 後轉動轉盤。<span class="red-t">紅色箭頭</span>會指向圓心，長度正比於向心加速度 a<sub>c</sub> = ω²r。</li>
-      <li><span class="green-t">綠色箭頭</span>沿著切線方向，長度正比於切線加速度 a<sub>t</sub> = αr。<strong>等速旋轉時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>；手動加速或煞車時才會明顯變長。綠色虛線標出切線軸的位置，箭頭指向速度方向。</li>
-      <li>轉速穩定後按 <strong>鎖定圓心方向</strong>，之後圓心方向就不再跟著漂移，量到的切線分量會更乾淨。</li>
+      <li>手機<strong>螢幕朝上平放</strong>在旋轉桌上，用膠帶或夾具固定，不要讓它滑動或自己轉。</li>
+      <li><strong>手機要放在遠離圓心的位置</strong>。向心加速度 a<sub>c</sub> = ω²r，放在圓心上 r = 0，不管轉多快都量不到東西。盡量靠轉盤外緣。</li>
+      <li><strong>轉盤要轉得夠快。</strong>r = 10 cm 時 10 rpm 只有 0.11 m/s²，30 rpm 才有 0.99 m/s²，60 rpm 有 3.9 m/s²。轉速加倍，讀值變成四倍。</li>
+      <li>按 <strong>開始測量</strong>，再按 <strong>校正方向</strong>，然後照畫面提示做：<strong>先讓轉盤靜止 → 轉起來 → 保持等速轉三圈</strong>。校正完圓心方向和旋轉方向就鎖定了，之後即時顯示。</li>
+      <li><span class="red-t">紅色箭頭</span>指向圓心，長度正比於 a<sub>c</sub>。<span class="green-t">綠色箭頭</span>沿切線方向，長度正比於 a<sub>t</sub> = αr —— <strong>等速時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>，加速或煞車時才明顯。灰色箭頭是未經平均的瞬時讀值。</li>
     </ol>
+
+    <h3>為什麼一定要先校正？</h3>
+    <p>轉盤平面只要沒有完全水平，重力就會漏 <strong>g·sinθ</strong> 進水平面。而<strong>手機跟著轉盤轉、重力卻固定在房間裡</strong>，所以這個洩漏向量在裝置座標中<strong>每轉一圈就繞一圈</strong>，向心加速度卻是不動的：</p>
+    <p><code>h(t) = a_c·ĉ + a_t·t̂ + g·sinθ·(以 −ω 旋轉的單位向量)</code></p>
+    <p>前兩項是直流，第三項是頻率 ω 的正弦。歸零校正扣不掉它（那只能扣常數偏移），一般低通也濾不掉。實測影響：</p>
+    <table>
+      <tr><th>轉盤傾斜</th><th>轉速</th><th>洩漏 vs 向心</th><th>圓心方向誤差</th></tr>
+      <tr><td>0°</td><td>28 rpm</td><td>0 vs 1.03</td><td>0°</td></tr>
+      <tr><td>2°</td><td>28 rpm</td><td>0.34 vs 1.03</td><td>±15°</td></tr>
+      <tr><td>4°</td><td>15 rpm</td><td>0.68 vs 0.30</td><td><strong>269°（整個轉一圈）</strong></td></tr>
+    </table>
+    <p><strong>唯一乾淨的解法是對整數圈取平均</strong> —— 正弦在整數週期上積分恰好為零。所以校正時要轉滿三圈：平均值給出圓心方向，殘差就是洩漏本身，從它的振幅可以反推轉盤傾斜了幾度。校正完的即時顯示也一直維持「最近一整圈」的移動平均，所以讀值不會隨著轉動脈動。</p>
+
     <h3>方向是怎麼定出來的</h3>
     <ul>
-      <li>裝置座標：<strong>+x 為螢幕右方、+y 為螢幕上方、+z 穿出螢幕</strong>。螢幕朝上平放時，規範下 <code>accelerationIncludingGravity.z ≈ +9.8</code>；iOS 回傳的正負號相反，程式會由 z 軸讀值自動判斷並修正。</li>
-      <li>修正後，量到的<strong>水平分量就等於真實加速度的水平分量</strong>（重力只有 z 分量），方向直接指向圓心，所以紅箭頭 = 水平分量方向。</li>
-      <li><strong>這件事只在手機真的平放時成立。</strong>手機歪 θ 度，重力就會漏 g·sinθ 到水平分量裡 —— 歪 1° 就是 0.17 m/s²，相當於 r = 10 cm 時轉 12 rpm 的訊號；歪 30° 是 4.9 m/s²，會把真正的圓周運動完全蓋過去。程式用 f<sub>z</sub> = g·cosθ 算出傾斜角，超過 10° 就停止更新圓心方向並示警，因為<strong>單看水平分量，「轉盤在轉」和「手機被拿歪」長得一模一樣</strong>。</li>
-      <li>畫面上 canvas 的 y 軸向下，和裝置 +y 相反，因此繪圖時對 y 取負號；另外用 <code>screen.orientation.angle</code> 補償橫豎屏，所以轉成橫向時箭頭也不會顛倒。</li>
-      <li>切線方向 = 圓心方向轉 90°，轉哪一邊由旋轉方向決定：ω &gt; 0（由螢幕上方往下看是逆時針）時，t̂ = (ĉ<sub>y</sub>, −ĉ<sub>x</sub>)。陀螺儀不可用時請用上方的下拉選單手動指定。</li>
-      <li>圓心方向本身怎麼定？圓周運動的加速度是 <strong>h = r·[ω²·ĉ + ω̇·rotate(ĉ, −90°)]</strong>，所以 h 的方向會從圓心方向偏掉 φ = atan2(ω̇, ω²)（和半徑無關）。程式把量到的方向轉回 +φ 再做低通，因此<strong>轉盤在加速或煞車時，圓心方向也不會被切線分量帶歪</strong>。沒有陀螺儀時退回 φ = 0，需要等速一段時間才會收斂。</li>
-      <li>半徑由 r = a<sub>c</sub> / ω² 推算，線速度 v = ωr。</li>
+      <li>裝置座標：<strong>+x 螢幕右、+y 螢幕上、+z 穿出螢幕</strong>。平放螢幕朝上時，規範下 <code>accelerationIncludingGravity.z ≈ +9.8</code>，iOS 相反，程式由 z 軸自動判定修正。</li>
+      <li>修正後，水平分量就等於真實加速度的水平分量（重力只有 z 分量），方向指向圓心。</li>
+      <li>canvas 的 y 軸向下、裝置 +y 向上，繪圖時對 y 取負號；另用 <code>screen.orientation.angle</code> 補償橫豎屏。</li>
+      <li><strong>旋轉方向也是純加速度計判定的</strong>：房間裡固定的向量在裝置座標中以 −ω 旋轉，所以校正時看重力洩漏往哪邊繞，轉盤就是相反的方向。切線方向 t̂ = (ĉ<sub>y</sub>, −ĉ<sub>x</sub>)（ω &gt; 0，即從螢幕上方往下看為逆時針時）。</li>
+      <li><strong>陀螺儀只用來取 |ω|</strong>（大小，與正負號慣例無關），供計算轉速、半徑、以及「轉了幾圈」。所有方向都不依賴陀螺儀，所以 iOS / Android 的陀螺儀正負號差異不會讓箭頭指反。沒有陀螺儀時改用固定時間窗平均，無法保證整數圈，精度會差一些。</li>
+      <li>半徑 r = a<sub>c</sub> / ω²，線速度 v = ωr。</li>
     </ul>
-    <h3>iOS 與 Android 的差異</h3>
+
+    <h3>手機自己被拿歪 vs 轉盤傾斜</h3>
+    <p>這是兩件事，程式分開處理。<strong>手機傾斜</strong>（相對於它所在的平面）由 <code>f_z = g·cosθ</code> 算出，超過 10° 就示警並把箭頭畫淡 —— 這時讀到的是重力不是圓周運動。<strong>轉盤傾斜</strong>則是整個平面沒水平，手機還是貼平的，f<sub>z</sub> 看不出異常，只能從校正時的洩漏振幅反推，顯示在狀態列的「轉盤」欄位。超過 3° 會標紅，建議把桌子墊平。</p>
+
+    <h3>iOS 與 Android</h3>
     <ul>
-      <li><strong>加速度計正負號</strong>：平放螢幕朝上時 Android 回傳 z ≈ +9.8、iOS 回傳 z ≈ −9.8。程式由 z 軸自動判定並修正，感測器狀態列會顯示目前採用哪一種慣例。</li>
-      <li><strong>陀螺儀正負號</strong>：兩邊不保證一致，而且沒有像重力那樣的固定參考可以直接判斷。程式改成在<strong>轉速有變化</strong>時比對兩種假設哪一個和已收斂的圓心方向吻合，自動決定要不要翻轉；翻轉後狀態列會標示「已翻轉」。等速時 φ ≈ 0，兩種假設在數學上無從分辨，這時只能靠陀螺儀原本的慣例或手動指定。<strong>發現綠箭頭指反了，直接用「旋轉方向」下拉選單覆蓋即可</strong>，手動設定優先於自動判定。</li>
-      <li><strong>權限</strong>：iOS 需要使用者手勢觸發授權（所以要按「開始測量」），而且「設定 → Safari → 動作與方向存取」必須開啟，否則一定被拒絕。Android Chrome 不需要額外授權，但兩者都必須是 HTTPS。</li>
-      <li><strong>取樣率</strong>：iOS 約 60 Hz 上限，Android 各機種不同。狀態列會顯示實際取樣率。</li>
+      <li><strong>加速度計正負號</strong>：Android 平放 z ≈ +9.8、iOS ≈ −9.8。自動判定修正。</li>
+      <li><strong>陀螺儀正負號</strong>：兩邊不保證一致，但本程式只取 |ω|，所以不受影響。</li>
+      <li><strong>權限</strong>：iOS 需使用者手勢觸發授權（所以要按「開始測量」），且「設定 → Safari → 動作與方向存取」必須開啟。兩者都必須是 HTTPS。</li>
+      <li><strong>取樣率</strong>：iOS 約 60 Hz 上限，Android 各機種不同，狀態列顯示實際值。</li>
     </ul>
     <p class="note">靈感來自 phyphox 的「向心加速度」實驗。本頁完全在手機端運算，不會上傳任何資料。</p>
   </details>

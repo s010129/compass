@@ -135,6 +135,7 @@ h1 {
 }
 
 .sensorbar .bad { color: var(--red); font-weight: 650; }
+.sensorbar .dim { color: #5d6577; }
 .sensorbar .good { color: var(--green); }
 
 .swatch.grey { background: rgba(190, 200, 220, .55); }
@@ -295,3 +296,19 @@ footer {
 @media (max-width: 360px) {
   .readouts { grid-template-columns: repeat(2, 1fr); }
 }
+
+.help table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: .74rem;
+}
+
+.help th, .help td {
+  border: 1px solid var(--line);
+  padding: 4px 6px;
+  text-align: center;
+}
+
+.help th { color: var(--fg-dim); font-weight: 600; }
+.help p { margin: 6px 0; }
