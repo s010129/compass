@@ -312,3 +312,33 @@ footer {
 
 .help th { color: var(--fg-dim); font-weight: 600; }
 .help p { margin: 6px 0; }
+
+/* ---------- 視角切換 ---------- */
+
+.viewtabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 3px;
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.tab {
+  flex: 1;
+  min-height: 34px;
+  font-size: .8rem;
+  font-family: inherit;
+  color: var(--fg-dim);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tab.on {
+  color: var(--fg);
+  background: var(--panel-2);
+  font-weight: 650;
+}

@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v4';
+const BUILD = 'v5';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -74,6 +74,8 @@ const state = {
   // 診斷
   leakAmp: 0,          // 重力洩漏振幅 m/s²
   tableTiltDeg: 0,     // 由洩漏振幅推得的轉盤傾斜角
+
+  viewMode: 'screen',  // 'screen' 手機自己的座標 | 'bird' 房間的鳥瞰
 
   range: 5,
   rangeMode: 'auto',
@@ -135,6 +137,9 @@ const els = {
   sbGyro: $('sbGyro'),
   sbTilt: $('sbTilt'),
   sbLeak: $('sbLeak'),
+  tabScreen: $('tabScreen'),
+  tabBird: $('tabBird'),
+  lgRaw: $('lgRaw'),
 };
 
 function setStatus(text, kind = '') {
@@ -694,7 +699,152 @@ function labelAt(ctx, x, y, text, color, w, h) {
   ctx.restore();
 }
 
+/** 鳥瞰視角的起始角度：手機畫在 3 點鐘方向，圓心在它左邊。 */
+const BIRD_BASE = 0;
+
+/**
+ * 鳥瞰視角：房間的參考系，手機繞著圓心跑。
+ *
+ * 和常見做法的三個差別：
+ *  1. 轉角用陀螺儀的 |ω| 積分驅動，不用 deviceorientation 的方位角 ——
+ *     方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），
+ *     在 iOS 是相對值且會持續漂移。
+ *  2. canvas 的 y 軸向下，所以螢幕上的逆時針對應 canvas 角度「遞減」。
+ *     直接把角度加上去會讓畫面轉向和實際相反。
+ *  3. 箭頭長度是真的量出來的 a_c / a_t，不是從假設的圓幾何畫出來的。
+ *     方向由校正鎖定的 ĉ 決定，手機圖示也照 ĉ 轉到正確的安裝角度。
+ */
+function drawBirdView() {
+  const { ctx, w, h } = fitCanvas(els.view);
+  const size = Math.min(w, h);
+  const cx = w / 2;
+  const cy = h / 2;
+  const R = size * 0.32;
+  const maxArrow = size * 0.22;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#10131b';
+  ctx.fillRect(0, 0, w, h);
+
+  // 轉盤
+  ctx.strokeStyle = '#2f3648';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, TWO_PI);
+  ctx.stroke();
+
+  // 手機在圓上的位置。spin > 0 是螢幕上的逆時針，canvas 角度要遞減。
+  const a = BIRD_BASE - state.spin * state.psi;
+  const px = cx + Math.cos(a) * R;
+  const py = cy + Math.sin(a) * R;
+
+  // 走過的軌跡（在手機後方）
+  ctx.strokeStyle = 'rgba(90,169,255,.28)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, a + state.spin * 1.5, a, state.spin > 0);
+  ctx.stroke();
+
+  // 半徑線
+  ctx.save();
+  ctx.setLineDash([4, 5]);
+  ctx.strokeStyle = 'rgba(140,152,180,.45)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(px, py);
+  ctx.stroke();
+  ctx.restore();
+
+  // 圓心
+  ctx.fillStyle = '#e7ecf3';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, TWO_PI);
+  ctx.fill();
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.fillStyle = '#949db0';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('圓心', cx, cy + 9);
+
+  const { r } = derived();
+  if (Number.isFinite(r)) {
+    ctx.fillStyle = '#5d6577';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`r = ${r.toFixed(3)} m`,
+      cx + Math.cos(a) * R * 0.5, cy + Math.sin(a) * R * 0.5 - 12);
+  }
+
+  // 手機圖示。轉到讓裝置的 ĉ 對準指向圓心的方向 —— 也就是真實的安裝角度。
+  const aIn = Math.atan2(cy - py, cx - px);
+  const alphaC = state.cHat ? Math.atan2(-state.cHat.y, state.cHat.x) : 0;
+  const iconRot = aIn - alphaC;
+  const iw = size * 0.085;
+  const ih = size * 0.16;
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(iconRot);
+  ctx.fillStyle = '#1e2436';
+  ctx.strokeStyle = '#7d879e';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(-iw / 2, -ih / 2, iw, ih, iw * 0.18);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#0b0d12';
+  ctx.fillRect(-iw * 0.36, -ih * 0.38, iw * 0.72, ih * 0.76);
+  ctx.fillStyle = '#4a536e';
+  ctx.beginPath();
+  ctx.roundRect(-iw * 0.14, -ih / 2 + ih * 0.05, iw * 0.28, 2.5, 2);
+  ctx.fill();
+  ctx.restore();
+
+  if (!state.cHat) {
+    ctx.fillStyle = '#5d6577';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('轉動轉盤以取得圓心方向…', cx, h - 14);
+    return;
+  }
+
+  // 前進方向：位置角以 −spin 的速率變化，所以速度方向是 spin·(sin a, −cos a)
+  const tang = { x: state.spin * Math.sin(a), y: -state.spin * Math.cos(a) };
+
+  updateRange();
+  const k = maxArrow / state.range;
+  const len = (v) => Math.min(Math.abs(v) * k, maxArrow);
+
+  if (!state.level) ctx.globalAlpha = 0.22;
+
+  const tSign = state.atAvg >= 0 ? 1 : -1;
+  const tl = len(state.atAvg);
+  arrow(ctx, px, py, px + tang.x * tl * tSign, py + tang.y * tl * tSign, '#3ddc84', 5);
+
+  const cSign = state.acAvg >= 0 ? 1 : -1;
+  const cl = len(state.acAvg);
+  arrow(ctx, px, py,
+    px + Math.cos(aIn) * cl * cSign, py + Math.sin(aIn) * cl * cSign, '#ff4d55', 6);
+  ctx.globalAlpha = 1;
+
+  // 旋轉方向與狀態
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#5aa9ff';
+  ctx.fillText(state.spin > 0 ? '逆時針 ↺' : '順時針 ↻', 12, h - 14);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#5d6577';
+  ctx.fillText(`${(state.omega * 60 / TWO_PI).toFixed(1)} rpm`, w - 12, h - 14);
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = state.calibrated ? '#3ddc84' : '#c9a227';
+  ctx.fillText(state.calibrated ? '已校正・方向鎖定' : '未校正・方向估計中', 12, 20);
+}
+
 function drawView() {
+  if (state.viewMode === 'bird') { drawBirdView(); return; }
   const { ctx, w, h } = fitCanvas(els.view);
   const size = Math.min(w, h);
   const cx = w / 2;
@@ -1052,6 +1202,18 @@ els.btnClear.addEventListener('click', () => {
   setStatus('已清除校正，回到自動估計');
 });
 
+function setViewMode(mode) {
+  state.viewMode = mode;
+  els.tabScreen.classList.toggle('on', mode === 'screen');
+  els.tabBird.classList.toggle('on', mode === 'bird');
+  // 灰色的瞬時向量只有螢幕視角才畫
+  els.lgRaw.style.display = mode === 'screen' ? '' : 'none';
+  try { localStorage.setItem('viewMode', mode); } catch { /* 無痕模式會丟錯 */ }
+}
+
+els.tabScreen.addEventListener('click', () => setViewMode('screen'));
+els.tabBird.addEventListener('click', () => setViewMode('bird'));
+
 els.selSpin.addEventListener('change', (e) => {
   state.spinMode = e.target.value;
   if (state.spinMode !== 'auto') state.spin = state.spinMode === 'ccw' ? 1 : -1;
@@ -1083,6 +1245,10 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   });
 }
+
+let savedView = 'screen';
+try { savedView = localStorage.getItem('viewMode') || 'screen'; } catch { /* 略 */ }
+setViewMode(savedView === 'bird' ? 'bird' : 'screen');
 
 els.sensorInfo.textContent = `${BUILD} · 尚未取得感測器資料`;
 setStatus('尚未開始 — 按下「開始測量」');

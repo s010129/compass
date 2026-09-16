@@ -34,11 +34,15 @@
       <span id="sbTilt">手機 —</span>
       <span id="sbLeak">轉盤 —</span>
     </div>
+    <div class="viewtabs">
+      <button id="tabScreen" class="tab on" type="button">螢幕視角</button>
+      <button id="tabBird" class="tab" type="button">鳥瞰視角</button>
+    </div>
     <canvas id="view" class="view"></canvas>
     <div class="legend">
       <span><i class="swatch red"></i>向心 a<sub>c</sub>（指向圓心）</span>
       <span><i class="swatch green"></i>切線 a<sub>t</sub>（沿速度方向）</span>
-      <span><i class="swatch grey"></i>瞬時水平合成（含重力洩漏）</span>
+      <span id="lgRaw"><i class="swatch grey"></i>瞬時水平合成（含重力洩漏）</span>
     </div>
   </section>
 
@@ -100,6 +104,14 @@
       <li>按 <strong>開始測量</strong>，再按 <strong>校正方向</strong>，然後照畫面提示做：<strong>先讓轉盤靜止 → 轉起來 → 保持等速轉三圈</strong>。校正完圓心方向和旋轉方向就鎖定了，之後即時顯示。</li>
       <li><span class="red-t">紅色箭頭</span>指向圓心，長度正比於 a<sub>c</sub>。<span class="green-t">綠色箭頭</span>沿切線方向，長度正比於 a<sub>t</sub> = αr —— <strong>等速時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>，加速或煞車時才明顯。灰色箭頭是未經平均的瞬時讀值。</li>
     </ol>
+
+    <h3>兩種視角</h3>
+    <p>畫面上方可以切換，<strong>同一份資料、兩個參考系</strong>：</p>
+    <ul>
+      <li><strong>螢幕視角</strong>：手機自己的座標系。手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
+      <li><strong>鳥瞰視角</strong>：房間的座標系。手機繞著圓心跑，藍色弧線是走過的軌跡。這是站在旁邊的人看到的樣子。</li>
+    </ul>
+    <p>兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
 
     <h3>為什麼一定要先校正？</h3>
     <p>轉盤平面只要沒有完全水平，重力就會漏 <strong>g·sinθ</strong> 進水平面。而<strong>手機跟著轉盤轉、重力卻固定在房間裡</strong>，所以這個洩漏向量在裝置座標中<strong>每轉一圈就繞一圈</strong>，向心加速度卻是不動的：</p>
