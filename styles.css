@@ -120,6 +120,24 @@ h1 {
   vertical-align: -1px;
 }
 
+.sensorbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: .7rem;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.sensorbar .bad { color: var(--red); font-weight: 650; }
+.sensorbar .good { color: var(--green); }
+
+.swatch.grey { background: rgba(190, 200, 220, .55); }
 .swatch.red { background: var(--red); }
 .swatch.green { background: var(--green); }
 .swatch.blue { background: var(--blue); }

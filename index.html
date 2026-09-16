@@ -28,10 +28,17 @@
 <main>
 
   <section class="panel">
+    <div class="sensorbar" id="sensorBar">
+      <span id="sbRate">— Hz</span>
+      <span id="sbGyro">陀螺儀 —</span>
+      <span id="sbTilt">傾斜 —</span>
+      <span id="sbMag">|a<sub>h</sub>| —</span>
+    </div>
     <canvas id="view" class="view"></canvas>
     <div class="legend">
       <span><i class="swatch red"></i>向心 a<sub>c</sub>（指向圓心）</span>
       <span><i class="swatch green"></i>切線 a<sub>t</sub>（沿速度方向）</span>
+      <span><i class="swatch grey"></i>量到的水平合成向量</span>
     </div>
   </section>
 
@@ -88,6 +95,8 @@
     <summary>使用方式與原理</summary>
     <ol>
       <li>手機<strong>螢幕朝上平放</strong>在旋轉桌上，用膠帶或夾具固定，不要讓它滑動。</li>
+      <li><strong>手機要放在遠離圓心的位置</strong>。向心加速度是 a<sub>c</sub> = ω²r，放在圓心上 r = 0，不管轉多快都量不到東西。盡量靠轉盤外緣。</li>
+      <li><strong>轉盤要轉得夠快。</strong>r = 10 cm 時，10 rpm 只有 0.11 m/s²，30 rpm 才有 0.99 m/s²，60 rpm 有 3.9 m/s²。轉速加倍，讀值變成四倍。</li>
       <li>轉盤靜止時按 <strong>歸零校正</strong>，扣掉桌面沒有完全水平造成的重力分量。</li>
       <li>按 <strong>開始測量</strong> 後轉動轉盤。<span class="red-t">紅色箭頭</span>會指向圓心，長度正比於向心加速度 a<sub>c</sub> = ω²r。</li>
       <li><span class="green-t">綠色箭頭</span>沿著切線方向，長度正比於切線加速度 a<sub>t</sub> = αr。<strong>等速旋轉時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>；手動加速或煞車時才會明顯變長。綠色虛線標出切線軸的位置，箭頭指向速度方向。</li>
@@ -97,6 +106,7 @@
     <ul>
       <li>裝置座標：<strong>+x 為螢幕右方、+y 為螢幕上方、+z 穿出螢幕</strong>。螢幕朝上平放時，規範下 <code>accelerationIncludingGravity.z ≈ +9.8</code>；iOS 回傳的正負號相反，程式會由 z 軸讀值自動判斷並修正。</li>
       <li>修正後，量到的<strong>水平分量就等於真實加速度的水平分量</strong>（重力只有 z 分量），方向直接指向圓心，所以紅箭頭 = 水平分量方向。</li>
+      <li><strong>這件事只在手機真的平放時成立。</strong>手機歪 θ 度，重力就會漏 g·sinθ 到水平分量裡 —— 歪 1° 就是 0.17 m/s²，相當於 r = 10 cm 時轉 12 rpm 的訊號；歪 30° 是 4.9 m/s²，會把真正的圓周運動完全蓋過去。程式用 f<sub>z</sub> = g·cosθ 算出傾斜角，超過 10° 就停止更新圓心方向並示警，因為<strong>單看水平分量，「轉盤在轉」和「手機被拿歪」長得一模一樣</strong>。</li>
       <li>畫面上 canvas 的 y 軸向下，和裝置 +y 相反，因此繪圖時對 y 取負號；另外用 <code>screen.orientation.angle</code> 補償橫豎屏，所以轉成橫向時箭頭也不會顛倒。</li>
       <li>切線方向 = 圓心方向轉 90°，轉哪一邊由旋轉方向決定：ω &gt; 0（由螢幕上方往下看是逆時針）時，t̂ = (ĉ<sub>y</sub>, −ĉ<sub>x</sub>)。陀螺儀不可用時請用上方的下拉選單手動指定。</li>
       <li>圓心方向本身怎麼定？圓周運動的加速度是 <strong>h = r·[ω²·ĉ + ω̇·rotate(ĉ, −90°)]</strong>，所以 h 的方向會從圓心方向偏掉 φ = atan2(ω̇, ω²)（和半徑無關）。程式把量到的方向轉回 +φ 再做低通，因此<strong>轉盤在加速或煞車時，圓心方向也不會被切線分量帶歪</strong>。沒有陀螺儀時退回 φ = 0，需要等速一段時間才會收斂。</li>

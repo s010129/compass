@@ -24,6 +24,9 @@ const state = {
   signConv: 1,
   gzLP: 0,             // 原始 z 的低通，用來判斷慣例與是否平放
   convReady: false,    // 慣例是否已判定
+  fzLP: 0,             // 修正後 z 的低通
+  tiltDeg: 0,          // 手機偏離水平的角度
+  level: true,         // 是否夠平，不平時分解結果無意義
 
   offX: 0,             // 歸零校正的水平偏移（裝置座標）
   offY: 0,
@@ -78,6 +81,10 @@ const els = {
   rdR: $('rdR'),
   rdV: $('rdV'),
   rdAh: $('rdAh'),
+  sbRate: $('sbRate'),
+  sbGyro: $('sbGyro'),
+  sbTilt: $('sbTilt'),
+  sbMag: $('sbMag'),
 };
 
 function setStatus(text, kind = '') {
@@ -122,6 +129,14 @@ function handleSample(raw, rotZdeg, t) {
   const s = state.signConv;
   const fz = s * raw.z;
 
+  // 傾斜角：平放且只有水平加速度時 f_z 恰好等於 g，傾斜 θ 度會讓 f_z = g·cosθ。
+  // 這是唯一能把「真的水平加速度」和「手機被拿歪」分開的線索 —— 水平分量
+  // 本身兩者看起來一模一樣。
+  state.fzLP += (fz - state.fzLP) * 0.05;
+  state.tiltDeg = Math.acos(Math.min(1, Math.max(-1, state.fzLP / G))) / DEG;
+  state.level = state.tiltDeg < 10;
+  const level = state.level;
+
   // 2) 水平分量。手機平放時重力只有 z 分量，所以 (x, y) 就是真實加速度的
   //    水平分量，方向直接指向圓心。offX/offY 補掉桌面沒完全水平的殘留。
   const h = { x: s * raw.x - state.offX, y: s * raw.y - state.offY };
@@ -153,11 +168,15 @@ function handleSample(raw, rotZdeg, t) {
   //    所以把 ĥ 轉回 +φ 就直接得到圓心方向 —— 轉盤在加速或煞車時，
   //    圓心方向的估計也不會被切線分量帶歪。沒有陀螺儀時退回 φ = 0，
   //    純靠低通慢慢收斂。
-  const usable = hMag > 0.25 && (!state.hasGyro || Math.abs(state.omega) > 0.5);
+  //
+  //    門檻只擋兩件事：訊號太小（方向是雜訊），以及手機沒放平（這時水平
+  //    分量幾乎都是重力洩漏，不是圓周運動）。不再要求 ω 超過某個值 ——
+  //    轉得慢一樣要能看，慢只是箭頭短而已。
+  const usable = hMag > 0.08 && level;
   if (usable) {
-    const phi = state.hasGyro
-      ? Math.atan2(state.alpha, state.omega * state.omega)
-      : 0;
+    // ω 很小的時候 φ = atan2(ω̇, ω²) 會發散（分母趨近 0），此時不修正
+    const w2 = state.omega * state.omega;
+    const phi = state.hasGyro && w2 > 1 ? Math.atan2(state.alpha, w2) : 0;
     const cs = Math.cos(phi);
     const sn = Math.sin(phi);
     const u = {
@@ -169,7 +188,8 @@ function handleSample(raw, rotZdeg, t) {
       // 幾乎反向時低通會卡在反方向（正規化後是個不動點），直接翻過去
       state.cHat = u;
     } else if (!state.centerLocked) {
-      const k = state.hasGyro ? 0.06 : 0.02;
+      // 訊號越弱收斂越慢，避免雜訊把方向甩來甩去
+      const k = (state.hasGyro ? 0.06 : 0.02) * Math.min(1, Math.max(0.15, hMag));
       const cx = state.cHat.x + (u.x - state.cHat.x) * k;
       const cy = state.cHat.y + (u.y - state.cHat.y) * k;
       const n = Math.hypot(cx, cy) || 1;
@@ -188,13 +208,19 @@ function handleSample(raw, rotZdeg, t) {
     state.at = h.x * tHat.x + h.y * tHat.y;
   }
 
-  // 7) 平放檢查
-  const flat = fz / G;
+  // 7) 狀態：把「為什麼沒有反應」直接講出來
   if (state.mode === 'demo') {
     setStatus('示範模式：模擬轉盤加速 → 等速 → 煞車', 'warn');
   } else if (state.mode === 'sensor') {
-    if (flat < 0.9) {
-      setStatus(`手機沒有平放（z = ${fz.toFixed(1)} m/s²），請放平再量`, 'warn');
+    if (!level) {
+      setStatus(
+        `手機沒有平放（傾斜 ${state.tiltDeg.toFixed(1)}°，重力洩漏約 ` +
+        `${(G * Math.sin(state.tiltDeg * DEG)).toFixed(1)} m/s²）—— 此時讀到的` +
+        `是重力不是圓周運動`,
+        'err',
+      );
+    } else if (hMag < 0.08) {
+      setStatus('已平放，但水平加速度幾乎是 0：轉盤要轉，而且手機不能放在圓心上', 'warn');
     } else {
       setStatus(
         state.hasGyro ? '量測中' : '量測中（無陀螺儀，請手動選旋轉方向）',
@@ -452,12 +478,25 @@ function drawView() {
   drawPhone(ctx, cx, cy, size);
   drawAxisGizmo(ctx, 26, h - 30);
 
+  // 量到的水平合成向量。不管有沒有取得圓心方向都畫，讓人一眼看出程式活著、
+  // 而且看得到紅綠兩個分量是從哪一個向量拆出來的。
+  const hS = toScreen(state.h);
+  const hMag = Math.hypot(hS.x, hS.y);
+  if (hMag > 0.02) {
+    const hLen = Math.min(hMag * k, R);
+    arrow(ctx, cx, cy,
+      cx + (hS.x / hMag) * hLen, cy - (hS.y / hMag) * hLen,
+      'rgba(190,200,220,.45)', 3);
+  }
+
   if (!state.cHat) {
     ctx.save();
     ctx.fillStyle = '#5d6577';
     ctx.font = '12px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('轉動轉盤以取得圓心方向…', cx, cy + R + 22);
+    ctx.fillText(
+      hMag > 0.02 ? '訊號太弱或手機沒放平，尚未取得圓心方向' : '轉動轉盤以取得圓心方向…',
+      cx, cy + R + 22);
     ctx.restore();
     return;
   }
@@ -490,6 +529,10 @@ function drawView() {
 
   const clampLen = (a) => Math.min(Math.abs(a) * k, R);
 
+  // 沒放平的時候水平分量主要是重力洩漏，分解出來的紅綠分量沒有物理意義，
+  // 所以畫淡並蓋上警告，不要讓人誤讀。
+  if (!state.level) ctx.globalAlpha = 0.22;
+
   // 綠色：切線分量（先畫，讓紅色疊在上面）
   const atLen = clampLen(state.at);
   const tSign = state.at >= 0 ? 1 : -1;
@@ -503,6 +546,21 @@ function drawView() {
   arrow(ctx, cx, cy,
     cx + c.x * acLen * cSign, cy - c.y * acLen * cSign,
     '#ff4d55', 6);
+
+  ctx.globalAlpha = 1;
+  if (!state.level) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,77,85,.14)';
+    ctx.fillRect(0, cy - 26, w, 52);
+    ctx.fillStyle = '#ff4d55';
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`手機傾斜 ${state.tiltDeg.toFixed(0)}° — 讀到的是重力`, cx, cy - 8);
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillText('請放平再量', cx, cy + 11);
+    ctx.restore();
+  }
 
   // 旋轉方向指示
   ctx.save();
@@ -632,7 +690,17 @@ function updateReadouts() {
   els.rdRpm.textContent = state.hasGyro ? fmt((w * 60) / (2 * Math.PI), 1) : '–';
   els.rdR.textContent = fmt(r, 3);
   els.rdV.textContent = fmt(v);
-  els.rdAh.textContent = fmt(Math.hypot(state.h.x, state.h.y));
+  const hMag = Math.hypot(state.h.x, state.h.y);
+  els.rdAh.textContent = fmt(hMag);
+
+  els.sbRate.textContent = `${state.hz.toFixed(0)} Hz`;
+  els.sbGyro.innerHTML = state.hasGyro
+    ? '陀螺儀 <span class="good">✓</span>'
+    : '陀螺儀 <span class="bad">✗</span>';
+  const tiltBad = state.tiltDeg >= 10;
+  els.sbTilt.innerHTML = `傾斜 <span class="${tiltBad ? 'bad' : 'good'}">` +
+    `${state.tiltDeg.toFixed(1)}°</span>`;
+  els.sbMag.textContent = `|a_h| ${fmt(hMag)}`;
   els.sensorInfo.textContent =
     `${state.sampleCount} 筆 · ${state.hz.toFixed(0)} Hz · ` +
     `慣例 ${state.signConv > 0 ? '規範(+z)' : 'iOS(−z)'} · ` +
@@ -703,6 +771,7 @@ els.btnDemo.addEventListener('click', () => {
 
 function resetEstimators() {
   state.gzLP = 0;
+  state.fzLP = 0;
   state.convReady = false;
   state.cHat = null;
   state.centerLocked = false;
