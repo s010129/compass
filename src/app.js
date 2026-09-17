@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v7';
+const BUILD = 'v8';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -984,15 +984,34 @@ function drawTestView() {
   }
   ctx.restore();
 
-  // 四個角的座標，標出原始座標系的範圍
+  // 四個角的座標。原點在左上角，所以 (0,0) 一定要標在左上角 ——
+  // 標到左下角會讓人以為原點在下面，和 clientX / clientY 的慣例相反。
+  const W = Math.round(w);
+  const H = Math.round(h);
   ctx.save();
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
   ctx.fillStyle = '#5d6577';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText('(0,0)', 4, h - 14);
-  ctx.textAlign = 'right';
-  ctx.fillText(`(${Math.round(w)},${Math.round(h)})`, w - 4, h - 14);
+  // 全螢幕時右上角有「離開」鈕，該角的標籤往下挪開
+  const trY = test.fs ? 58 : 3;
+  for (const [tx, ty, align, base, label] of [
+    [4, 3, 'left', 'top', `(0,0)`],
+    [w - 4, trY, 'right', 'top', `(${W},0)`],
+    [4, h - 4, 'left', 'bottom', `(0,${H})`],
+    [w - 4, h - 4, 'right', 'bottom', `(${W},${H})`],
+  ]) {
+    ctx.textAlign = align;
+    ctx.textBaseline = base;
+    ctx.fillText(label, tx, ty);
+  }
+
+  // 原點記號：左上角的直角，讓「(0,0) 在這裡」一眼可見
+  ctx.strokeStyle = '#7d879e';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0.5, 18);
+  ctx.lineTo(0.5, 0.5);
+  ctx.lineTo(18, 0.5);
+  ctx.stroke();
   ctx.restore();
 }
 
