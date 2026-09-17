@@ -7,7 +7,7 @@
  *
  * 改動程式碼時記得把 VERSION 一起往上跳，並和 src/app.js 的 BUILD 保持一致。
  */
-const VERSION = 'v8';
+const VERSION = 'v9';
 const CACHE = `turntable-${VERSION}`;
 
 const ASSETS = [

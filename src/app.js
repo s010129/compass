@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v8';
+const BUILD = 'v9';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -75,7 +75,7 @@ const state = {
   leakAmp: 0,          // 重力洩漏振幅 m/s²
   tableTiltDeg: 0,     // 由洩漏振幅推得的轉盤傾斜角
 
-  viewMode: 'screen',  // 'screen' 手機自己的座標 | 'bird' 房間的鳥瞰 | 'test' 座標測試
+  viewMode: 'screen',  // 'screen' | 'bird' | 'test' | 'raw'
 
   range: 5,
   rangeMode: 'auto',
@@ -102,6 +102,15 @@ const calib = {
   speedBuf: [],        // 最近的轉速，用來判斷是否等速
   speed0: 0,           // 開始取樣時的轉速
 };
+
+/**
+ * 原始向量診斷用：最近幾秒的水平向量末端。
+ *
+ * 轉盤傾斜時，重力洩漏在裝置座標中每轉一圈繞一圈，所以這串末端會畫出一個
+ * 「圓」—— 圓心是真正的向心向量，半徑就是洩漏振幅。一眼就能看出訊號好壞。
+ */
+const rawTrail = [];
+const RAW_TRAIL_SECS = 4;
 
 /** 每圈平均用的環形緩衝。 */
 const revBuf = { items: [], sumC: 0, sumT: 0, sumW: 0, psi: 0, secs: 0 };
@@ -140,6 +149,7 @@ const els = {
   tabScreen: $('tabScreen'),
   tabBird: $('tabBird'),
   tabTest: $('tabTest'),
+  tabRaw: $('tabRaw'),
   legendMain: $('legendMain'),
   readouts: $('readouts'),
   controlsMain: $('controlsMain'),
@@ -421,6 +431,9 @@ function handleSample(raw, rotZdeg, t) {
   const h = { x: s * raw.x, y: s * raw.y };
   state.h = h;
   state.hMag = Math.hypot(h.x, h.y);
+
+  rawTrail.push({ x: h.x, y: h.y, t });
+  while (rawTrail.length && t - rawTrail[0].t > RAW_TRAIL_SECS) rawTrail.shift();
 
   // 4) 角速度。只取大小，所以 iOS / Android 的正負號慣例都無所謂。
   if (rotZdeg !== null && rotZdeg !== undefined) {
@@ -706,6 +719,138 @@ function labelAt(ctx, x, y, text, color, w, h) {
     Math.min(Math.max(x, tw / 2 + 6), w - tw / 2 - 6),
     Math.min(Math.max(y, 12), h - 12),
   );
+  ctx.restore();
+}
+
+/**
+ * 原始向量：完全不處理的對照畫面。
+ *
+ * 不校正、不估圓心、不做每圈平均 —— 就把加速度計的水平分量直接畫成箭頭，
+ * 用來和「螢幕視角」對照：
+ *   這裡的箭頭穩、那邊的紅箭頭亂 → 問題在估計層
+ *   這裡的箭頭本身就亂           → 問題在感測器／擺設／桌面傾斜
+ *
+ * 最近幾秒的向量末端會畫成軌跡。轉盤傾斜時那串末端會畫出一個圓：
+ * 圓心是真正的向心向量，半徑就是重力洩漏的振幅。
+ */
+function drawRawView() {
+  const { ctx, w, h } = fitCanvas(els.view);
+  const size = Math.min(w, h);
+  const cx = w / 2;
+  const cy = h / 2;
+  const R = size * 0.36;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#10131b';
+  ctx.fillRect(0, 0, w, h);
+
+  // 量程照軌跡裡的最大值自動選
+  let peak = state.hMag;
+  for (const p of rawTrail) peak = Math.max(peak, Math.hypot(p.x, p.y));
+  const range = RANGE_LADDER.find((v) => v >= peak * 1.25) ?? 100;
+  const k = R / range;
+
+  ctx.save();
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  for (const frac of [0.5, 1]) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * frac, 0, TWO_PI);
+    ctx.strokeStyle = frac === 1 ? '#2f3648' : '#222838';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    const d = R * frac * 0.707;
+    ctx.fillStyle = '#5d6577';
+    ctx.fillText(`${+(range * frac).toFixed(2)}`, cx - d, cy - d);
+  }
+  ctx.restore();
+
+  drawAxisGizmo(ctx, 26, h - 30);
+
+  // 軌跡：越舊越淡
+  const n = rawTrail.length;
+  for (let i = 0; i < n; i++) {
+    const p = rawTrail[i];
+    const v = toScreen(p);
+    const age = i / Math.max(1, n - 1);
+    ctx.fillStyle = `rgba(90,169,255,${(0.08 + age * 0.5).toFixed(3)})`;
+    ctx.beginPath();
+    ctx.arc(cx + v.x * k, cy - v.y * k, 2, 0, TWO_PI);
+    ctx.fill();
+  }
+
+  // 軌跡的平均與離散度：平均 = 真正的向心向量，RMS = 重力洩漏振幅
+  let mx = 0;
+  let my = 0;
+  for (const p of rawTrail) { mx += p.x; my += p.y; }
+  if (n) { mx /= n; my /= n; }
+  let sq = 0;
+  for (const p of rawTrail) {
+    const dx = p.x - mx;
+    const dy = p.y - my;
+    sq += dx * dx + dy * dy;
+  }
+  const rms = n ? Math.sqrt(sq / n) : 0;
+  const meanMag = Math.hypot(mx, my);
+
+  if (n > 10 && meanMag > 0.02) {
+    const m = toScreen({ x: mx, y: my });
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(255,201,60,.8)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + m.x * k, cy - m.y * k);
+    ctx.stroke();
+    // 洩漏的圓：以平均向量為圓心、RMS 為半徑
+    ctx.setLineDash([3, 5]);
+    ctx.strokeStyle = 'rgba(255,201,60,.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx + m.x * k, cy - m.y * k, rms * k, 0, TWO_PI);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 主箭頭：當下的水平向量，完全未處理
+  const hs = toScreen(state.h);
+  const hm = Math.hypot(hs.x, hs.y);
+  if (hm > 0.01) {
+    const len = Math.min(hm * k, R);
+    arrow(ctx, cx, cy, cx + (hs.x / hm) * len, cy - (hs.y / hm) * len, '#ff4d55', 6);
+  }
+
+  // 讀數。角度採 0° = +X 右、90° = +Y 上（數學慣例，逆時針為正）
+  let deg = Math.atan2(state.h.y, state.h.x) / DEG;
+  if (deg < 0) deg += 360;
+  const ratio = meanMag > 0.02 ? rms / meanMag : Infinity;
+  const verdict = n < 30 ? ['等待資料…', '#5d6577']
+    : meanMag < 0.05 ? ['水平加速度太小，轉盤沒轉或手機在圓心上', '#c9a227']
+      : ratio < 0.15 ? ['訊號乾淨，方向可信', '#3ddc84']
+        : ratio < 0.6 ? ['洩漏明顯，未校正時方向會抖', '#c9a227']
+          : ['洩漏蓋過訊號，未校正時方向會亂轉', '#ff4d55'];
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#ff4d55';
+  ctx.font = '600 24px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText(state.hMag > 0.08 ? `${deg.toFixed(1)}°` : '—', cx, 8);
+  ctx.fillStyle = '#949db0';
+  ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText(`ax ${state.h.x.toFixed(2)}　ay ${state.h.y.toFixed(2)}` +
+    `　|a| ${state.hMag.toFixed(2)} m/s²`, cx, 38);
+  ctx.fillStyle = '#5d6577';
+  ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText(`軌跡平均 ${meanMag.toFixed(2)}　洩漏(RMS) ${rms.toFixed(2)}` +
+    `　比值 ${Number.isFinite(ratio) ? ratio.toFixed(2) : '—'}`, cx, 56);
+  ctx.fillStyle = verdict[1];
+  ctx.font = '600 12px system-ui, sans-serif';
+  ctx.fillText(verdict[0], cx, 74);
+  ctx.fillStyle = '#46506b';
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.fillText('未校正・未平均・原始讀值　0° = +X 右，90° = +Y 上', cx, h - 16);
   ctx.restore();
 }
 
@@ -1161,6 +1306,7 @@ function drawBirdView() {
 
 function drawView() {
   if (state.viewMode === 'test') { drawTestView(); return; }
+  if (state.viewMode === 'raw') { drawRawView(); return; }
   if (state.viewMode === 'bird') { drawBirdView(); return; }
   const { ctx, w, h } = fitCanvas(els.view);
   const size = Math.min(w, h);
@@ -1524,6 +1670,7 @@ function setViewMode(mode) {
   els.tabScreen.classList.toggle('on', mode === 'screen');
   els.tabBird.classList.toggle('on', mode === 'bird');
   els.tabTest.classList.toggle('on', mode === 'test');
+  els.tabRaw.classList.toggle('on', mode === 'raw');
 
   // 座標測試是獨立畫面，量測相關的區塊全部收起來
   const testing = mode === 'test';
@@ -1535,6 +1682,7 @@ function setViewMode(mode) {
   if (!testing && test.fs) toggleTestFullscreen();
   // 灰色的瞬時向量只有螢幕視角才畫
   els.lgRaw.style.display = mode === 'screen' ? '' : 'none';
+  els.legendMain.classList.toggle('hidden', testing || mode === 'raw');
 
   if (testing) {
     testSetPos(0, 0);
@@ -1546,6 +1694,7 @@ function setViewMode(mode) {
 els.tabScreen.addEventListener('click', () => setViewMode('screen'));
 els.tabBird.addEventListener('click', () => setViewMode('bird'));
 els.tabTest.addEventListener('click', () => setViewMode('test'));
+els.tabRaw.addEventListener('click', () => setViewMode('raw'));
 
 // 十字鍵畫在 canvas 上（這樣燈才能疊在它上面），所以用點擊座標做命中判定
 els.view.addEventListener('pointerdown', (e) => {
@@ -1619,7 +1768,7 @@ if ('serviceWorker' in navigator) {
 
 let savedView = 'screen';
 try { savedView = localStorage.getItem('viewMode') || 'screen'; } catch { /* 略 */ }
-setViewMode(['bird', 'test'].includes(savedView) ? savedView : 'screen');
+setViewMode(['bird', 'test', 'raw'].includes(savedView) ? savedView : 'screen');
 
 els.sensorInfo.textContent = `${BUILD} · 尚未取得感測器資料`;
 setStatus('尚未開始 — 按下「開始測量」');

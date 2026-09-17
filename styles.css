@@ -328,7 +328,7 @@ footer {
 .tab {
   flex: 1;
   min-height: 34px;
-  font-size: .8rem;
+  font-size: .74rem;
   font-family: inherit;
   color: var(--fg-dim);
   background: transparent;

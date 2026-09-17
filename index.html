@@ -37,6 +37,7 @@
     <div class="viewtabs">
       <button id="tabScreen" class="tab on" type="button">螢幕視角</button>
       <button id="tabBird" class="tab" type="button">鳥瞰視角</button>
+      <button id="tabRaw" class="tab" type="button">原始向量</button>
       <button id="tabTest" class="tab" type="button">座標測試</button>
     </div>
     <canvas id="view" class="view"></canvas>
@@ -111,14 +112,25 @@
       <li><span class="red-t">紅色箭頭</span>指向圓心，長度正比於 a<sub>c</sub>。<span class="green-t">綠色箭頭</span>沿切線方向，長度正比於 a<sub>t</sub> = αr —— <strong>等速時 a<sub>t</sub> ≈ 0，綠箭頭會非常短</strong>，加速或煞車時才明顯。灰色箭頭是未經平均的瞬時讀值。</li>
     </ol>
 
-    <h3>三個視角</h3>
+    <h3>四個視角</h3>
     <p>畫面上方可以切換。前兩個是<strong>同一份資料、兩個參考系</strong>：</p>
     <ul>
       <li><strong>螢幕視角</strong>：手機自己的座標系。手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
       <li><strong>鳥瞰視角</strong>：房間的座標系。手機繞著圓心跑，藍色弧線是走過的軌跡。這是站在旁邊的人看到的樣子。</li>
-      <li><strong>座標測試</strong>：驗證螢幕座標轉換有沒有顛倒，見下一節。</li>
+      <li><strong>原始向量</strong>：完全不處理的對照畫面，見下一節。</li>
+      <li><strong>座標測試</strong>：驗證螢幕座標轉換有沒有顛倒。</li>
     </ul>
     <p>這兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
+
+    <h3>原始向量（診斷用）</h3>
+    <p>不校正、不估圓心、不做每圈平均 —— 直接把加速度計的水平分量畫成箭頭，附 <code>atan2</code> 角度讀數（0° = +X 右，90° = +Y 上）。用來和「螢幕視角」對照：<strong>這裡的箭頭穩、那邊的紅箭頭亂 → 問題在估計層；這裡本身就亂 → 問題在感測器、擺設或桌面傾斜</strong>。</p>
+    <p>最近 4 秒的向量末端會畫成藍色軌跡。<strong>轉盤只要有傾斜，那串末端就會畫出一個圓</strong> —— 圓心（黃色虛線指的地方）是真正的向心向量，半徑就是重力洩漏的振幅。畫面上直接給三個數字：</p>
+    <ul>
+      <li><strong>軌跡平均</strong>：真正的向心加速度大小</li>
+      <li><strong>洩漏 (RMS)</strong>：重力洩漏振幅，等於 g·sinθ</li>
+      <li><strong>比值</strong>：洩漏 ÷ 向心。小於 0.15 訊號乾淨；0.15～0.6 方向會抖；<strong>大於 0.6 未校正時方向會亂轉</strong></li>
+    </ul>
+    <p>比值偏大就代表桌子要墊平、手機要往外挪、或轉快一點——而且一定要先做「校正方向」。</p>
 
     <h3>座標測試</h3>
     <p>第三個分頁，顯示<strong>整個畫面的原始像素座標</strong>，原點 (0, 0) 在左上角，和瀏覽器的 <code>clientX / clientY</code> 完全一致。</p>
