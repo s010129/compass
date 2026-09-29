@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v9';
+const BUILD = 'v10';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -76,6 +76,7 @@ const state = {
   tableTiltDeg: 0,     // 由洩漏振幅推得的轉盤傾斜角
 
   viewMode: 'screen',  // 'screen' | 'bird' | 'test' | 'raw'
+  screenMode: 'centri', // 螢幕視角底下的模式：'centri' 向心分解 | 'linear' 平面加速度
 
   range: 5,
   rangeMode: 'auto',
@@ -111,6 +112,39 @@ const calib = {
  */
 const rawTrail = [];
 const RAW_TRAIL_SECS = 4;
+
+/**
+ * 平面加速度（螢幕視角的第二個模式）：在桌面上推手機時的即時加速度向量。
+ *
+ * 和向心分解完全獨立：讀的是 e.acceleration（系統已經扣掉重力的線性加速度），
+ * 不估圓心、不做每圈平均，只做「歸零 → 反轉 → 低通 → 死區」四步。
+ * 所以轉盤傾斜造成的重力洩漏在這裡不會出現 —— 系統已經把重力整個扣掉了。
+ */
+const linear = {
+  has: null,           // 這支手機有沒有提供 e.acceleration；null = 還不知道
+  raw: { x: 0, y: 0 }, // 未處理的讀值，歸零時拿它當基準
+  off: { x: 0, y: 0 }, // 歸零偏移
+  ax: 0, ay: 0,        // 低通 + 死區之後的值（裝置座標）
+  mag: 0,
+  peak: 0,
+  // X 預設反轉：沿用原程式的預設（原作者依自己的手機行為設定）
+  invertX: true,
+  invertY: false,
+  hist: [],            // 波形圖用，最近 LINEAR_HIST 筆 {x, y}
+  note: '',            // 暫時蓋過狀態列的訊息（例如「歸零完成」）
+  noteUntil: 0,
+  exitHit: null,       // 全螢幕時「離開」鈕的命中框
+};
+if (typeof window !== 'undefined') window.__linear = linear;
+
+/** 波形圖保留的筆數，以感測器事件計（約 60 Hz 下不到 2 秒）。 */
+const LINEAR_HIST = 100;
+/** 低通係數：新值佔 0.3。約 3 筆就跟上，夠快又能壓掉手抖。 */
+const LINEAR_LP = 0.3;
+/** 死區：靜止時的雜訊約 ±0.05 m/s²，低於這個一律當 0，箭頭才不會亂跳。 */
+const LINEAR_DEAD = 0.08;
+/** 箭頭比例：1 m/s² = 22 CSS px。固定不自動縮放，推得越急箭頭就越長。 */
+const LINEAR_PX = 22;
 
 /** 每圈平均用的環形緩衝。 */
 const revBuf = { items: [], sumC: 0, sumT: 0, sumW: 0, psi: 0, secs: 0 };
@@ -160,6 +194,23 @@ const els = {
   btnFull: $('btnFull'),
   btnOrigin: $('btnOrigin'),
   lgRaw: $('lgRaw'),
+  screenTabs: $('screenTabs'),
+  subCentri: $('subCentri'),
+  subLinear: $('subLinear'),
+  readoutsLinear: $('readoutsLinear'),
+  controlsLinear: $('controlsLinear'),
+  lgChartCentri: $('lgChartCentri'),
+  lgChartLinear: $('lgChartLinear'),
+  btnZero: $('btnZero'),
+  btnPeak: $('btnPeak'),
+  btnInvX: $('btnInvX'),
+  btnInvY: $('btnInvY'),
+  btnFullLinear: $('btnFullLinear'),
+  rlAx: $('rlAx'),
+  rlAy: $('rlAy'),
+  rlMag: $('rlMag'),
+  rlAngle: $('rlAngle'),
+  rlPeak: $('rlPeak'),
 };
 
 function setStatus(text, kind = '') {
@@ -526,6 +577,57 @@ function derived() {
   return { w: state.omega, r, v };
 }
 
+// ---------------------------------------------------------------- 平面加速度
+
+/**
+ * 平面加速度的取樣。和 handleSample 平行、互不相干，每個感測器事件都跑，
+ * 這樣切到這個模式的瞬間就有資料，不用重新開始量測。
+ */
+function handleLinear(a) {
+  const ok = !!a && a.x !== null && a.x !== undefined;
+  if (ok) linear.has = true;
+  else if (linear.has === null) linear.has = false;
+
+  linear.raw = { x: ok ? a.x || 0 : 0, y: ok ? a.y || 0 : 0 };
+  let x = linear.raw.x - linear.off.x;
+  let y = linear.raw.y - linear.off.y;
+  if (linear.invertX) x = -x;
+  if (linear.invertY) y = -y;
+
+  linear.ax += (x - linear.ax) * LINEAR_LP;
+  linear.ay += (y - linear.ay) * LINEAR_LP;
+  // 死區直接寫回濾波器狀態，靜止時才會真的停在 0，而不是慢慢衰減
+  if (Math.abs(linear.ax) < LINEAR_DEAD) linear.ax = 0;
+  if (Math.abs(linear.ay) < LINEAR_DEAD) linear.ay = 0;
+
+  linear.mag = Math.hypot(linear.ax, linear.ay);
+  if (linear.mag > linear.peak) linear.peak = linear.mag;
+
+  linear.hist.push({ x: linear.ax, y: linear.ay });
+  if (linear.hist.length > LINEAR_HIST) linear.hist.shift();
+
+  if (!isLinearView()) return;
+  if (performance.now() < linear.noteUntil) {
+    setStatus(linear.note, 'ok');
+  } else if (state.mode === 'demo') {
+    setStatus('示範模式：模擬轉盤的加速度（系統已扣除重力，所以沒有洩漏）', 'warn');
+  } else if (!linear.has) {
+    setStatus('這支手機沒有提供扣除重力的加速度（acceleration），平面加速度無法使用', 'err');
+  } else {
+    setStatus('平面加速度：在桌面上推動手機，紅箭頭指向加速度方向', 'ok');
+  }
+}
+
+function isLinearView() {
+  return state.viewMode === 'screen' && state.screenMode === 'linear';
+}
+
+function linearNote(text) {
+  linear.note = text;
+  linear.noteUntil = performance.now() + 8000;
+  setStatus(text, 'ok');
+}
+
 // ---------------------------------------------------------------- 感測器
 
 async function startSensor() {
@@ -561,13 +663,16 @@ async function startSensor() {
 
 function onDeviceMotion(e) {
   const a = e.accelerationIncludingGravity;
-  if (!a || a.x === null || a.x === undefined) return;
-  const rr = e.rotationRate;
-  handleSample(
-    { x: a.x, y: a.y, z: a.z },
-    rr && rr.alpha !== null ? rr.alpha : undefined,
-    performance.now() / 1000,
-  );
+  if (a && a.x !== null && a.x !== undefined) {
+    const rr = e.rotationRate;
+    handleSample(
+      { x: a.x, y: a.y, z: a.z },
+      rr && rr.alpha !== null ? rr.alpha : undefined,
+      performance.now() / 1000,
+    );
+  }
+  // 放在 handleSample 之後，平面加速度模式的狀態訊息才不會被蓋掉
+  handleLinear(e.acceleration);
 }
 
 // ---------------------------------------------------------------- 示範模式
@@ -612,6 +717,8 @@ function demoSample(t) {
     demo.w / DEG + n(),
     t,
   );
+  // 系統的 acceleration 已扣掉重力，所以這裡沒有洩漏項
+  handleLinear({ x: ac * c.x + at * tHat.x + n(), y: ac * c.y + at * tHat.y + n(), z: n() });
 }
 
 // ---------------------------------------------------------------- 繪圖
@@ -854,6 +961,134 @@ function drawRawView() {
   ctx.restore();
 }
 
+/**
+ * 平面加速度畫面：手機固定在中央，紅色粗箭頭就是當下的加速度向量。
+ *
+ * 比例固定 LINEAR_PX，不自動縮放 —— 這個畫面要讓人看出「推得越急箭頭越長」，
+ * 自動量程會把這個感覺抹掉。
+ */
+function drawLinearView() {
+  const { ctx, w, h } = fitCanvas(els.view);
+  const size = Math.min(w, h);
+  const cx = w / 2;
+  const cy = h / 2;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#10131b';
+  ctx.fillRect(0, 0, w, h);
+
+  // 背景格線，每格 25 px，以中心對齊才不會一邊寬一邊窄
+  ctx.save();
+  ctx.strokeStyle = '#181d2a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = cx % 25; x <= w; x += 25) {
+    ctx.moveTo(Math.round(x) + 0.5, 0);
+    ctx.lineTo(Math.round(x) + 0.5, h);
+  }
+  for (let y = cy % 25; y <= h; y += 25) {
+    ctx.moveTo(0, Math.round(y) + 0.5);
+    ctx.lineTo(w, Math.round(y) + 0.5);
+  }
+  ctx.stroke();
+
+  // 通過中心的參考軸
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(140,152,180,.3)';
+  ctx.beginPath();
+  ctx.moveTo(0, cy);
+  ctx.lineTo(w, cy);
+  ctx.moveTo(cx, 0);
+  ctx.lineTo(cx, h);
+  ctx.stroke();
+  ctx.restore();
+
+  // 軸標籤跟著 toScreen 走，橫屏時才標在正確的邊上
+  const ex = toScreen({ x: 1, y: 0 });
+  const ey = toScreen({ x: 0, y: 1 });
+  labelAt(ctx, cx + ex.x * (w / 2 - 30), cy - ex.y * (h / 2 - 30) - 10,
+    '+X（右）', '#5d6577', w, h);
+  labelAt(ctx, cx + ey.x * (w / 2 - 30) + 26, cy - ey.y * (h / 2 - 30),
+    '+Y（前）', '#5d6577', w, h);
+
+  drawPhone(ctx, cx, cy, size);
+  ctx.save();
+  ctx.fillStyle = '#7d879e';
+  ctx.font = '600 13px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('手機', cx, cy - size * 0.13);
+  ctx.fillStyle = '#ff4d55';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, TWO_PI);
+  ctx.fill();
+  ctx.restore();
+
+  drawAxisGizmo(ctx, 26, h - 44);
+
+  // 箭頭。裝置 +y 朝上、canvas +y 朝下，所以 y 取負號
+  if (linear.mag > LINEAR_DEAD) {
+    const v = toScreen({ x: linear.ax, y: linear.ay });
+    const tx = cx + v.x * LINEAR_PX;
+    const ty = cy - v.y * LINEAR_PX;
+    arrow(ctx, cx, cy, tx, ty, '#ff4d55', 12);
+
+    // 箭頭尖端外側的數值標籤，夾在畫面內才不會跑出去
+    const ux = v.x / linear.mag;
+    const uy = -v.y / linear.mag;
+    const text = `${linear.mag.toFixed(2)} m/s²`;
+    ctx.save();
+    ctx.font = '600 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const bw = ctx.measureText(text).width + 16;
+    const bh = 22;
+    const lx = Math.min(Math.max(tx + ux * 34, bw / 2 + 4), w - bw / 2 - 4);
+    const ly = Math.min(Math.max(ty + uy * 34, bh / 2 + 4), h - bh / 2 - 4);
+    ctx.fillStyle = 'rgba(11,13,18,.9)';
+    ctx.strokeStyle = '#ff4d55';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(lx - bw / 2, ly - bh / 2, bw, bh, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ff8a90';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, lx, ly + 1);
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  const flips = [linear.invertX && 'X', linear.invertY && 'Y'].filter(Boolean);
+  ctx.fillStyle = flips.length ? '#c9a227' : '#5d6577';
+  ctx.fillText(flips.length ? `已反轉 ${flips.join('、')} 軸` : '未反轉', 12, 20);
+  ctx.fillStyle = '#46506b';
+  ctx.textAlign = 'center';
+  ctx.fillText(`紅色粗箭頭：即時加速度方向與強度（手推方向）　1 m/s² = ${LINEAR_PX} px`,
+    cx, h - 12);
+  ctx.restore();
+
+  // 全螢幕時畫面蓋住所有按鈕，右上角要留一個「離開」
+  linear.exitHit = test.fs ? { x: w - 56, y: 8, w: 48, h: 44 } : null;
+  if (linear.exitHit) {
+    const r = linear.exitHit;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(148,157,176,.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 9);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(200,210,228,.75)';
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('離開', r.x + r.w / 2, r.y + r.h / 2);
+    ctx.restore();
+  }
+}
+
 // ---------------------------------------------------------------- 座標測試
 
 /**
@@ -929,11 +1164,11 @@ function testHold(dir) {
 }
 
 /**
- * 全螢幕。iPhone 的 Safari 沒有 Fullscreen API（只有 iPad 有），
- * 所以先套 CSS 的滿版覆蓋，再「盡量」呼叫 Fullscreen API；
+ * 全螢幕（座標測試與平面加速度共用）。iPhone 的 Safari 沒有 Fullscreen API
+ * （只有 iPad 有），所以先套 CSS 的滿版覆蓋，再「盡量」呼叫 Fullscreen API；
  * 失敗也還是滿版，只是上面會留系統列。
  */
-async function toggleTestFullscreen() {
+async function toggleFullscreen() {
   if (test.fs) {
     test.fs = false;
     document.body.classList.remove('fs-test');
@@ -1306,6 +1541,7 @@ function drawBirdView() {
 
 function drawView() {
   if (state.viewMode === 'test') { drawTestView(); return; }
+  if (isLinearView()) { drawLinearView(); return; }
   if (state.viewMode === 'raw') { drawRawView(); return; }
   if (state.viewMode === 'bird') { drawBirdView(); return; }
   const { ctx, w, h } = fitCanvas(els.view);
@@ -1467,7 +1703,48 @@ function drawView() {
   ctx.restore();
 }
 
+/** 平面加速度的 X / Y 波形，最近 LINEAR_HIST 筆。 */
+function drawLinearChart() {
+  const { ctx, w, h } = fitCanvas(els.chart);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#10131b';
+  ctx.fillRect(0, 0, w, h);
+
+  const hist = linear.hist;
+  const aMax = Math.max(1, ...hist.map((d) => Math.max(Math.abs(d.x), Math.abs(d.y)))) * 1.15;
+  const X = (i) => (i / (LINEAR_HIST - 1)) * w;
+  const Y = (v) => h / 2 - (v / aMax) * (h / 2 - 8);
+
+  ctx.strokeStyle = '#222838';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h / 2);
+  ctx.lineTo(w, h / 2);
+  ctx.stroke();
+
+  // 靠右對齊：最新的一筆永遠在最右邊，資料不滿時左邊留白
+  const off = LINEAR_HIST - hist.length;
+  for (const [key, color] of [['x', '#5aa9ff'], ['y', '#ffc93c']]) {
+    if (hist.length < 2) break;
+    ctx.beginPath();
+    hist.forEach((d, i) => {
+      if (i === 0) ctx.moveTo(X(i + off), Y(d[key])); else ctx.lineTo(X(i + off), Y(d[key]));
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#5d6577';
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(`±${aMax.toFixed(1)} m/s²`, w - 4, 11);
+  ctx.textAlign = 'left';
+  ctx.fillText(`最近 ${LINEAR_HIST} 筆`, 4, h - 4);
+}
+
 function drawChart() {
+  if (isLinearView()) { drawLinearChart(); return; }
   const { ctx, w, h } = fitCanvas(els.chart);
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = '#10131b';
@@ -1551,6 +1828,16 @@ function updateReadouts() {
   els.rdR.textContent = fmt(r, 3);
   els.rdV.textContent = fmt(v);
   els.rdAh.textContent = fmt(state.hMag);
+
+  if (isLinearView()) {
+    let deg = Math.atan2(linear.ay, linear.ax) / DEG;
+    if (deg < 0) deg += 360;
+    els.rlAx.textContent = fmt(linear.ax);
+    els.rlAy.textContent = fmt(linear.ay);
+    els.rlMag.textContent = fmt(linear.mag);
+    els.rlAngle.textContent = linear.mag > LINEAR_DEAD ? fmt(deg, 1) : '0.0';
+    els.rlPeak.textContent = fmt(linear.peak);
+  }
 
   els.sbRate.textContent = `${state.hz.toFixed(0)} Hz`;
   els.sbGyro.innerHTML = state.hasGyro
@@ -1665,48 +1952,84 @@ els.btnClear.addEventListener('click', () => {
   setStatus('已清除校正，回到自動估計');
 });
 
-function setViewMode(mode) {
-  state.viewMode = mode;
+/** 依目前的視角與螢幕視角模式，決定哪些區塊要顯示。 */
+function applyLayout() {
+  const mode = state.viewMode;
+  const testing = mode === 'test';
+  const lin = isLinearView();
+
   els.tabScreen.classList.toggle('on', mode === 'screen');
   els.tabBird.classList.toggle('on', mode === 'bird');
   els.tabTest.classList.toggle('on', mode === 'test');
   els.tabRaw.classList.toggle('on', mode === 'raw');
+  els.subCentri.classList.toggle('on', state.screenMode === 'centri');
+  els.subLinear.classList.toggle('on', state.screenMode === 'linear');
+  els.screenTabs.classList.toggle('hidden', mode !== 'screen');
 
   // 座標測試是獨立畫面，量測相關的區塊全部收起來
-  const testing = mode === 'test';
-  for (const el of [els.readouts, els.controlsMain, els.controlsOpts,
-    els.chartPanel, els.sensorBar, els.legendMain]) {
+  for (const el of [els.controlsMain, els.chartPanel, els.sensorBar]) {
     el.classList.toggle('hidden', testing);
   }
   els.controlsTest.classList.toggle('hidden', !testing);
-  if (!testing && test.fs) toggleTestFullscreen();
+
+  // 平面加速度用不到校正、旋轉方向與量程，換成自己的讀數和按鈕
+  els.readouts.classList.toggle('hidden', testing || lin);
+  els.controlsOpts.classList.toggle('hidden', testing || lin);
+  els.btnCalib.classList.toggle('hidden', lin);
+  els.btnClear.classList.toggle('hidden', lin);
+  els.readoutsLinear.classList.toggle('hidden', !lin);
+  els.controlsLinear.classList.toggle('hidden', !lin);
+  els.lgChartCentri.classList.toggle('hidden', lin);
+  els.lgChartLinear.classList.toggle('hidden', !lin);
+
+  // 全螢幕只有座標測試和平面加速度有，離開這兩個畫面就退出
+  if (!testing && !lin && test.fs) toggleFullscreen();
   // 灰色的瞬時向量只有螢幕視角才畫
   els.lgRaw.style.display = mode === 'screen' ? '' : 'none';
-  els.legendMain.classList.toggle('hidden', testing || mode === 'raw');
+  els.legendMain.classList.toggle('hidden', testing || mode === 'raw' || lin);
+}
 
-  if (testing) {
+function setViewMode(mode) {
+  state.viewMode = mode;
+  applyLayout();
+  if (mode === 'test') {
     testSetPos(0, 0);
     setStatus('座標測試：點畫面任一處或用十字鍵移動燈，按中間回到 (0,0)', 'warn');
   }
   try { localStorage.setItem('viewMode', mode); } catch { /* 無痕模式會丟錯 */ }
 }
 
+function setScreenMode(mode) {
+  state.screenMode = mode;
+  // 校正流程的狀態訊息會和平面加速度搶狀態列，切過去就先取消
+  if (mode === 'linear' && calib.active) stopCalibration();
+  applyLayout();
+  try { localStorage.setItem('screenMode', mode); } catch { /* 無痕模式會丟錯 */ }
+}
+
 els.tabScreen.addEventListener('click', () => setViewMode('screen'));
+els.subCentri.addEventListener('click', () => setScreenMode('centri'));
+els.subLinear.addEventListener('click', () => setScreenMode('linear'));
 els.tabBird.addEventListener('click', () => setViewMode('bird'));
 els.tabTest.addEventListener('click', () => setViewMode('test'));
 els.tabRaw.addEventListener('click', () => setViewMode('raw'));
 
 // 十字鍵畫在 canvas 上（這樣燈才能疊在它上面），所以用點擊座標做命中判定
 els.view.addEventListener('pointerdown', (e) => {
-  if (state.viewMode !== 'test' || !test.hits) return;
   const r = els.view.getBoundingClientRect();
   const x = e.clientX - r.left;
   const y = e.clientY - r.top;
   const inside = (box) => box && x >= box.x && x <= box.x + box.w
     && y >= box.y && y <= box.y + box.h;
+
+  if (isLinearView()) {
+    if (inside(linear.exitHit)) { e.preventDefault(); toggleFullscreen(); }
+    return;
+  }
+  if (state.viewMode !== 'test' || !test.hits) return;
   e.preventDefault();
 
-  if (inside(test.hits.exit)) { toggleTestFullscreen(); return; }
+  if (inside(test.hits.exit)) { toggleFullscreen(); return; }
   for (const dir of ['up', 'down', 'left', 'right']) {
     if (inside(test.hits[dir])) { testHold(dir); return; }
   }
@@ -1728,11 +2051,31 @@ window.addEventListener('keydown', (e) => {
   const m = moves[e.key];
   if (m) { testSetPos(test.x + m[0], test.y + m[1]); e.preventDefault(); }
   else if (e.key === '0') testSetPos(0, 0);
-  else if (e.key === 'f') toggleTestFullscreen();
+  else if (e.key === 'f') toggleFullscreen();
 });
 
-els.btnFull.addEventListener('click', toggleTestFullscreen);
+els.btnFull.addEventListener('click', toggleFullscreen);
 els.btnOrigin.addEventListener('click', () => testSetPos(0, 0));
+
+els.btnZero.addEventListener('click', () => {
+  linear.off = { ...linear.raw };
+  // 濾波器裡還留著歸零前的值，一起清掉，箭頭才會立刻回到 0
+  linear.ax = linear.ay = linear.mag = 0;
+  linearNote('歸零完成：已將目前的讀值設為 0 m/s² 基準點');
+});
+
+els.btnPeak.addEventListener('click', () => { linear.peak = 0; });
+
+function syncInvertButtons() {
+  els.btnInvX.classList.toggle('on', linear.invertX);
+  els.btnInvY.classList.toggle('on', linear.invertY);
+  els.btnInvX.setAttribute('aria-pressed', String(linear.invertX));
+  els.btnInvY.setAttribute('aria-pressed', String(linear.invertY));
+}
+
+els.btnInvX.addEventListener('click', () => { linear.invertX = !linear.invertX; syncInvertButtons(); });
+els.btnInvY.addEventListener('click', () => { linear.invertY = !linear.invertY; syncInvertButtons(); });
+els.btnFullLinear.addEventListener('click', toggleFullscreen);
 
 els.selSpin.addEventListener('change', (e) => {
   state.spinMode = e.target.value;
@@ -1768,6 +2111,10 @@ if ('serviceWorker' in navigator) {
 
 let savedView = 'screen';
 try { savedView = localStorage.getItem('viewMode') || 'screen'; } catch { /* 略 */ }
+try {
+  if (localStorage.getItem('screenMode') === 'linear') state.screenMode = 'linear';
+} catch { /* 略 */ }
+syncInvertButtons();
 setViewMode(['bird', 'test', 'raw'].includes(savedView) ? savedView : 'screen');
 
 els.sensorInfo.textContent = `${BUILD} · 尚未取得感測器資料`;

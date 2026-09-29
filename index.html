@@ -40,6 +40,10 @@
       <button id="tabRaw" class="tab" type="button">原始向量</button>
       <button id="tabTest" class="tab" type="button">座標測試</button>
     </div>
+    <div class="viewtabs sub" id="screenTabs">
+      <button id="subCentri" class="tab on" type="button">向心分解</button>
+      <button id="subLinear" class="tab" type="button">平面加速度</button>
+    </div>
     <canvas id="view" class="view"></canvas>
     <div class="legend" id="legendMain">
       <span><i class="swatch red"></i>向心 a<sub>c</sub>（指向圓心）</span>
@@ -55,6 +59,14 @@
     <div class="cell"><span class="k">半徑 r</span><span class="v" id="rdR">–</span><span class="u">m</span></div>
     <div class="cell"><span class="k">線速度 v</span><span class="v" id="rdV">–</span><span class="u">m/s</span></div>
     <div class="cell"><span class="k">水平合成 |a<sub>h</sub>|</span><span class="v" id="rdAh">–</span><span class="u">m/s²</span></div>
+  </section>
+
+  <section class="readouts hidden" id="readoutsLinear">
+    <div class="cell"><span class="k"><i class="swatch blue"></i>X 軸分量（左右）</span><span class="v" id="rlAx">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k"><i class="swatch gold"></i>Y 軸分量（前後）</span><span class="v" id="rlAy">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k">水平合加速度 |a|</span><span class="v" id="rlMag">–</span><span class="u">m/s²</span></div>
+    <div class="cell"><span class="k">方向角 θ</span><span class="v" id="rlAngle">–</span><span class="u">°</span></div>
+    <div class="cell wide"><span class="k">歷史最大加速度</span><span class="v red-t" id="rlPeak">–</span><span class="u">m/s²</span></div>
   </section>
 
   <section class="controls" id="controlsMain">
@@ -86,6 +98,14 @@
     </label>
   </section>
 
+  <section class="controls hidden" id="controlsLinear">
+    <button id="btnZero" class="btn">靜止歸零</button>
+    <button id="btnPeak" class="btn ghost">重設最大值</button>
+    <button id="btnInvX" class="btn" aria-pressed="true">反轉 X 軸（左右）</button>
+    <button id="btnInvY" class="btn" aria-pressed="false">反轉 Y 軸（前後）</button>
+    <button id="btnFullLinear" class="btn">全螢幕</button>
+  </section>
+
   <section class="controls hidden" id="controlsTest">
     <button id="btnFull" class="btn">全螢幕</button>
     <button id="btnOrigin" class="btn ghost">回到 (0,0)</button>
@@ -94,9 +114,15 @@
   <section class="panel" id="chartPanel">
     <canvas id="chart" class="chart"></canvas>
     <div class="legend small">
-      <span><i class="swatch red"></i>a<sub>c</sub></span>
-      <span><i class="swatch green"></i>a<sub>t</sub></span>
-      <span><i class="swatch blue"></i>ω</span>
+      <span class="lgset" id="lgChartCentri">
+        <span><i class="swatch red"></i>a<sub>c</sub></span>
+        <span><i class="swatch green"></i>a<sub>t</sub></span>
+        <span><i class="swatch blue"></i>ω</span>
+      </span>
+      <span class="lgset hidden" id="lgChartLinear">
+        <span><i class="swatch blue"></i>X 軸（左右）</span>
+        <span><i class="swatch gold"></i>Y 軸（前後）</span>
+      </span>
       <span class="grow"></span>
       <button id="btnCsv" class="btn tiny" disabled>匯出 CSV</button>
     </div>
@@ -115,12 +141,24 @@
     <h3>四個視角</h3>
     <p>畫面上方可以切換。前兩個是<strong>同一份資料、兩個參考系</strong>：</p>
     <ul>
-      <li><strong>螢幕視角</strong>：手機自己的座標系。手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
+      <li><strong>螢幕視角</strong>：分成「向心分解」與「平面加速度」兩個模式，見下一節。向心分解是手機自己的座標系。手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
       <li><strong>鳥瞰視角</strong>：房間的座標系。手機繞著圓心跑，藍色弧線是走過的軌跡。這是站在旁邊的人看到的樣子。</li>
       <li><strong>原始向量</strong>：完全不處理的對照畫面，見下一節。</li>
       <li><strong>座標測試</strong>：驗證螢幕座標轉換有沒有顛倒。</li>
     </ul>
     <p>這兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
+
+    <h3>平面加速度（螢幕視角的第二個模式）</h3>
+    <p>不用轉盤，把手機<strong>螢幕朝上平放在水平桌面上</strong>，直接在桌面上推動手機：</p>
+    <ul>
+      <li><span class="red-t">紅色粗箭頭</span>指向手機當下的加速度方向（左右與前後都有），長度正比於大小，<strong>推得越急箭頭越長</strong>。比例固定為 1 m/s² = 22 px。</li>
+      <li>讀數給 X / Y 分量、合加速度 |a|、方向角 θ（0° = +X 右，90° = +Y 前）與歷史最大值；下方波形圖是最近 100 筆的 X / Y。</li>
+      <li><strong>靜止歸零</strong>：手機放著不動時按一下，把目前讀值設成 0 的基準點。</li>
+      <li><strong>反轉 X / Y 軸</strong>：箭頭方向和手推的方向相反時用。X 軸預設為反轉（沿用原程式的設定）。</li>
+      <li>小於 0.08 m/s² 的讀值一律當成 0，避免靜止時箭頭亂跳。</li>
+    </ul>
+    <p>向量小知識：根據牛頓第二定律 <strong>F = m·a</strong>，加速度箭頭的方向就是手施加給手機的合力方向。</p>
+    <p>這個模式讀的是 <code>e.acceleration</code>（系統已經扣掉重力的加速度），和向心分解讀的 <code>accelerationIncludingGravity</code> 不同，不需要校正，也不受桌面傾斜影響。少數手機不提供這個值，狀態列會提示。</p>
 
     <h3>原始向量（診斷用）</h3>
     <p>不校正、不估圓心、不做每圈平均 —— 直接把加速度計的水平分量畫成箭頭，附 <code>atan2</code> 角度讀數（0° = +X 右，90° = +Y 上）。用來和「螢幕視角」對照：<strong>這裡的箭頭穩、那邊的紅箭頭亂 → 問題在估計層；這裡本身就亂 → 問題在感測器、擺設或桌面傾斜</strong>。</p>

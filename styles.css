@@ -142,6 +142,7 @@ h1 {
 .swatch.red { background: var(--red); }
 .swatch.green { background: var(--green); }
 .swatch.blue { background: var(--blue); }
+.swatch.gold { background: #ffc93c; }
 
 .red-t { color: var(--red); }
 .green-t { color: var(--green); }
@@ -342,6 +343,15 @@ footer {
   background: var(--panel-2);
   font-weight: 650;
 }
+
+/* 螢幕視角底下的模式切換，比主分頁矮一點，看得出是下一層 */
+.viewtabs.sub { margin-top: -4px; }
+.viewtabs.sub .tab { min-height: 28px; font-size: .7rem; }
+
+/* 圖例分組：平常攤平成 legend 的直接子項，要整組藏起來時才有作用 */
+.lgset { display: contents; }
+
+.cell.wide { grid-column: span 2; }
 
 .hidden { display: none !important; }
 
