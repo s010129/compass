@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v10';
+const BUILD = 'v11';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -76,7 +76,9 @@ const state = {
   tableTiltDeg: 0,     // 由洩漏振幅推得的轉盤傾斜角
 
   viewMode: 'screen',  // 'screen' | 'bird' | 'test' | 'raw'
-  screenMode: 'centri', // 螢幕視角底下的模式：'centri' 向心分解 | 'linear' 平面加速度
+  // 螢幕視角底下的模式：'centri' 向心分解 | 'linear' 向心力（讀 e.acceleration）。
+  // 向心分解先停用，只留 'linear'；要恢復時改回 'centri' 並打開 index.html 的註解
+  screenMode: 'linear',
 
   range: 5,
   rangeMode: 'auto',
@@ -114,7 +116,23 @@ const rawTrail = [];
 const RAW_TRAIL_SECS = 4;
 
 /**
- * 平面加速度（螢幕視角的第二個模式）：在桌面上推手機時的即時加速度向量。
+ * 平台判定。iOS 的 devicemotion 三軸正負號和規範相反（平放時 z ≈ −9.8），
+ * 所以向心力模式在 iOS 預設把 X、Y 都反轉，Android 維持原樣。
+ * iPadOS 13 起 UA 偽裝成 Mac，要用觸控點數補判。
+ */
+function detectPlatform() {
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) {
+    return 'ios';
+  }
+  if (/Android/.test(ua)) return 'android';
+  return 'other';
+}
+const PLATFORM = detectPlatform();
+const PLATFORM_NAME = { ios: 'iOS', android: 'Android', other: '其他' }[PLATFORM];
+
+/**
+ * 向心力模式（原「平面加速度」）：手機上的即時加速度向量。
  *
  * 和向心分解完全獨立：讀的是 e.acceleration（系統已經扣掉重力的線性加速度），
  * 不估圓心、不做每圈平均，只做「歸零 → 反轉 → 低通 → 死區」四步。
@@ -127,9 +145,9 @@ const linear = {
   ax: 0, ay: 0,        // 低通 + 死區之後的值（裝置座標）
   mag: 0,
   peak: 0,
-  // X 預設反轉：沿用原程式的預設（原作者依自己的手機行為設定）
-  invertX: true,
-  invertY: false,
+  // iOS 的正負號和規範相反，兩軸都翻回來；Android 與其他平台照規範
+  invertX: PLATFORM === 'ios',
+  invertY: PLATFORM === 'ios',
   hist: [],            // 波形圖用，最近 LINEAR_HIST 筆 {x, y}
   note: '',            // 暫時蓋過狀態列的訊息（例如「歸零完成」）
   noteUntil: 0,
@@ -612,9 +630,9 @@ function handleLinear(a) {
   } else if (state.mode === 'demo') {
     setStatus('示範模式：模擬轉盤的加速度（系統已扣除重力，所以沒有洩漏）', 'warn');
   } else if (!linear.has) {
-    setStatus('這支手機沒有提供扣除重力的加速度（acceleration），平面加速度無法使用', 'err');
+    setStatus('這支手機沒有提供扣除重力的加速度（acceleration），向心力模式無法使用', 'err');
   } else {
-    setStatus('平面加速度：在桌面上推動手機，紅箭頭指向加速度方向', 'ok');
+    setStatus('向心力：紅箭頭指向加速度方向', 'ok');
   }
 }
 
@@ -1063,7 +1081,7 @@ function drawLinearView() {
   ctx.textBaseline = 'alphabetic';
   const flips = [linear.invertX && 'X', linear.invertY && 'Y'].filter(Boolean);
   ctx.fillStyle = flips.length ? '#c9a227' : '#5d6577';
-  ctx.fillText(flips.length ? `已反轉 ${flips.join('、')} 軸` : '未反轉', 12, 20);
+  ctx.fillText(`${PLATFORM_NAME}・${flips.length ? `已反轉 ${flips.join('、')} 軸` : '未反轉'}`, 12, 20);
   ctx.fillStyle = '#46506b';
   ctx.textAlign = 'center';
   ctx.fillText(`紅色粗箭頭：即時加速度方向與強度（手推方向）　1 m/s² = ${LINEAR_PX} px`,
@@ -1183,6 +1201,16 @@ async function toggleFullscreen() {
   const el = document.documentElement;
   const req = el.requestFullscreen ?? el.webkitRequestFullscreen;
   if (req) { try { await req.call(el); } catch { /* 沒有就算了 */ } }
+  lockPortrait();                      // 進了全螢幕 Android 才准鎖
+}
+
+/**
+ * 鎖定直向。瀏覽器只在全螢幕或已安裝的 PWA 允許 lock()（manifest 已宣告
+ * portrait），iOS 完全不支援 —— 所以另外用 CSS 在手機橫放時蓋一層「請轉回直向」
+ * （見 styles.css 的 .rotate-hint），兩邊都擋住才算真的固定。
+ */
+async function lockPortrait() {
+  try { await screen.orientation?.lock?.('portrait'); } catch { /* 不支援或不在全螢幕 */ }
 }
 
 // 使用者按 Esc 離開時把狀態同步回來
@@ -1852,7 +1880,7 @@ function updateReadouts() {
     : '轉盤 <span class="dim">未校正</span>';
 
   els.sensorInfo.textContent =
-    `${BUILD} · ${state.sampleCount} 筆 · ${state.hz.toFixed(0)} Hz · ` +
+    `${BUILD} · ${PLATFORM_NAME} · ${state.sampleCount} 筆 · ${state.hz.toFixed(0)} Hz · ` +
     `慣例 ${state.signConv > 0 ? '規範(+z)' : 'iOS(−z)'} · ` +
     `螢幕 ${screen.orientation?.angle ?? 0}° · ` +
     `平均窗 ${state.hasGyro ? '1 圈' : `${LIVE_SECONDS_NO_GYRO}s`}`;
@@ -1918,6 +1946,7 @@ els.btnStart.addEventListener('click', async () => {
   if (state.mode === 'demo') setRunning(false);
   resetEstimators();
   setStatus('等待感測器…');
+  lockPortrait();
   if (await startSensor()) setRunning(true, 'sensor');
 });
 
@@ -1930,6 +1959,7 @@ els.btnDemo.addEventListener('click', () => {
   window.removeEventListener('devicemotion', onDeviceMotion);
   resetEstimators();
   demo.w = demo.t = demo.psi = 0;
+  lockPortrait();
   setRunning(true, 'demo');
 });
 
@@ -1962,7 +1992,7 @@ function applyLayout() {
   els.tabBird.classList.toggle('on', mode === 'bird');
   els.tabTest.classList.toggle('on', mode === 'test');
   els.tabRaw.classList.toggle('on', mode === 'raw');
-  els.subCentri.classList.toggle('on', state.screenMode === 'centri');
+  els.subCentri?.classList.toggle('on', state.screenMode === 'centri');
   els.subLinear.classList.toggle('on', state.screenMode === 'linear');
   els.screenTabs.classList.toggle('hidden', mode !== 'screen');
 
@@ -2008,7 +2038,8 @@ function setScreenMode(mode) {
 }
 
 els.tabScreen.addEventListener('click', () => setViewMode('screen'));
-els.subCentri.addEventListener('click', () => setScreenMode('centri'));
+// 向心分解先停用，按鈕在 index.html 裡註解掉了
+// els.subCentri.addEventListener('click', () => setScreenMode('centri'));
 els.subLinear.addEventListener('click', () => setScreenMode('linear'));
 els.tabBird.addEventListener('click', () => setViewMode('bird'));
 els.tabTest.addEventListener('click', () => setViewMode('test'));
@@ -2111,12 +2142,14 @@ if ('serviceWorker' in navigator) {
 
 let savedView = 'screen';
 try { savedView = localStorage.getItem('viewMode') || 'screen'; } catch { /* 略 */ }
-try {
-  if (localStorage.getItem('screenMode') === 'linear') state.screenMode = 'linear';
-} catch { /* 略 */ }
+// 向心分解停用期間不讀存檔，一律是向心力模式
+// try {
+//   if (localStorage.getItem('screenMode') === 'linear') state.screenMode = 'linear';
+// } catch { /* 略 */ }
 syncInvertButtons();
 setViewMode(['bird', 'test', 'raw'].includes(savedView) ? savedView : 'screen');
 
-els.sensorInfo.textContent = `${BUILD} · 尚未取得感測器資料`;
+els.sensorInfo.textContent = `${BUILD} · ${PLATFORM_NAME} · 尚未取得感測器資料`;
+lockPortrait();                        // 已安裝的 PWA 一開就能鎖
 setStatus('尚未開始 — 按下「開始測量」');
 requestAnimationFrame(loop);

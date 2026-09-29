@@ -12,6 +12,8 @@ const p = await b.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFa
 p.on('pageerror', (e) => errs.push('pageerror: ' + e.message));
 
 await p.goto('http://127.0.0.1:8123/index.html', { waitUntil: 'networkidle' });
+// 螢幕視角現在是向心力模式、沒有校正鈕；校正改從鳥瞰視角進
+await p.click('#tabBird');
 await p.click('#btnDemo');
 await p.click('#btnCalib');          // 靜止段就開始校正
 

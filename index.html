@@ -41,8 +41,10 @@
       <button id="tabTest" class="tab" type="button">座標測試</button>
     </div>
     <div class="viewtabs sub" id="screenTabs">
-      <button id="subCentri" class="tab on" type="button">向心分解</button>
-      <button id="subLinear" class="tab" type="button">平面加速度</button>
+      <!-- 向心分解先停用（程式碼保留）。要恢復：拿掉這層註解，並把 app.js 的 screenMode 預設改回 'centri'
+      <button id="subCentri" class="tab" type="button">向心分解</button>
+      -->
+      <button id="subLinear" class="tab on" type="button">向心力</button>
     </div>
     <canvas id="view" class="view"></canvas>
     <div class="legend" id="legendMain">
@@ -141,20 +143,20 @@
     <h3>四個視角</h3>
     <p>畫面上方可以切換。前兩個是<strong>同一份資料、兩個參考系</strong>：</p>
     <ul>
-      <li><strong>螢幕視角</strong>：分成「向心分解」與「平面加速度」兩個模式，見下一節。向心分解是手機自己的座標系。手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
+      <li><strong>螢幕視角</strong>：目前只有「向心力」模式，見下一節。（原本的向心分解暫時停用，以下是它的說明：手機自己的座標系。）手機圖示固定在中央，<strong>圓心方向不動</strong>——因為手機跟著轉盤一起轉，圓心相對於手機的方向本來就是固定的。這是感測器真正「看到」的東西。灰色箭頭是未經平均的瞬時值，<strong>你會看到灰箭頭繞圈、紅箭頭不動，那個繞圈的幅度就是重力洩漏</strong>。</li>
       <li><strong>鳥瞰視角</strong>：房間的座標系。手機繞著圓心跑，藍色弧線是走過的軌跡。這是站在旁邊的人看到的樣子。</li>
       <li><strong>原始向量</strong>：完全不處理的對照畫面，見下一節。</li>
       <li><strong>座標測試</strong>：驗證螢幕座標轉換有沒有顛倒。</li>
     </ul>
     <p>這兩個視角的箭頭<strong>長度完全一樣</strong>（a_c 與 a_t 的大小與參考系無關，兩者只差一個旋轉），差別只在畫面怎麼擺。鳥瞰視角的轉動是用<strong>陀螺儀的 |ω| 積分</strong>驅動的，不是用 <code>deviceorientation</code> 的方位角——方位角在 Android 是磁力計絕對值（轉盤的金屬軸承、馬達磁鐵會干擾），在 iOS 是相對值且會持續漂移。手機圖示也會照校正出來的 ĉ 轉到真實的安裝角度。</p>
 
-    <h3>平面加速度（螢幕視角的第二個模式）</h3>
-    <p>不用轉盤，把手機<strong>螢幕朝上平放在水平桌面上</strong>，直接在桌面上推動手機：</p>
+    <h3>向心力（螢幕視角）</h3>
+    <p>把手機<strong>螢幕朝上平放</strong>（在轉盤上，或直接在水平桌面上推動手機）：</p>
     <ul>
       <li><span class="red-t">紅色粗箭頭</span>指向手機當下的加速度方向（左右與前後都有），長度正比於大小，<strong>推得越急箭頭越長</strong>。比例固定為 1 m/s² = 22 px。</li>
       <li>讀數給 X / Y 分量、合加速度 |a|、方向角 θ（0° = +X 右，90° = +Y 前）與歷史最大值；下方波形圖是最近 100 筆的 X / Y。</li>
       <li><strong>靜止歸零</strong>：手機放著不動時按一下，把目前讀值設成 0 的基準點。</li>
-      <li><strong>反轉 X / Y 軸</strong>：箭頭方向和手推的方向相反時用。X 軸預設為反轉（沿用原程式的設定）。</li>
+      <li><strong>反轉 X / Y 軸</strong>：箭頭方向相反時用。程式會自動判斷手機平台：<strong>iOS 預設 X、Y 都反轉</strong>（iOS 的感測器正負號和規範相反），<strong>Android 預設都不反轉</strong>。頁尾會顯示判斷出的平台。</li>
       <li>小於 0.08 m/s² 的讀值一律當成 0，避免靜止時箭頭亂跳。</li>
     </ul>
     <p>向量小知識：根據牛頓第二定律 <strong>F = m·a</strong>，加速度箭頭的方向就是手施加給手機的合力方向。</p>
@@ -214,6 +216,14 @@
     </ul>
     <p class="note">靈感來自 phyphox 的「向心加速度」實驗。本頁完全在手機端運算，不會上傳任何資料。</p>
   </details>
+
+  <div class="rotate-hint" aria-hidden="true">
+    <div>
+      <div class="rotate-icon">⟲</div>
+      <p>請把手機轉回直向</p>
+      <p class="note">本工具固定使用直向畫面</p>
+    </div>
+  </div>
 
   <footer>
     <span id="sensorInfo">—</span>

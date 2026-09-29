@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-// 螢幕視角 → 平面加速度模式。注入已知的 e.acceleration，掃紅色箭頭像素確認方向。
+// 螢幕視角 → 向心力模式（讀 e.acceleration）。注入已知的 e.acceleration，掃紅色箭頭像素確認方向。
 const OUT = process.env.OUT || '/tmp';
 const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
 const errs = [];
@@ -11,7 +11,6 @@ await p.evaluate(() => localStorage.clear());
 await p.reload({ waitUntil: 'networkidle' });
 
 await p.click('#tabScreen');
-await p.click('#subLinear');
 await p.click('#btnStart');
 
 // 用 rAF 以真實時間持續注入，vec 可以隨時從外面換掉
@@ -69,15 +68,19 @@ const vis = await p.evaluate(() => Object.fromEntries(
 check('版面切換', !vis.readouts && vis.readoutsLinear && vis.controlsLinear && !vis.controlsOpts
   && !vis.btnCalib && vis.screenTabs && !vis.legendMain, JSON.stringify(vis));
 
-// 1) X 預設反轉：注入 +x → 箭頭朝左、讀數為負
+// 1) 桌機 Chromium 不是 iOS → 預設不反轉：+x 朝右，θ = 0
 await setVec(2, 0);
 await p.waitForTimeout(600);
 let c = await redCentroid();
 let r = await read();
-check('預設反轉 X：+x 朝左', c.dx < -10 && Math.abs(c.dy) < 5 && r.ax === '-2.00', `dx=${c.dx.toFixed(1)} dy=${c.dy.toFixed(1)} ax=${r.ax} θ=${r.ang}`);
-await p.screenshot({ path: `${OUT}/linear-invx.png` });
+check('非 iOS 預設不反轉：+x 朝右', c.dx > 10 && Math.abs(c.dy) < 5 && r.ax === '2.00', `dx=${c.dx.toFixed(1)} dy=${c.dy.toFixed(1)} ax=${r.ax} θ=${r.ang}`);
 
-// 2) 關掉反轉：+x → 朝右，θ = 0
+// 2) 按反轉 X：+x → 朝左；再按一次回來
+await p.click('#btnInvX');
+await p.waitForTimeout(600);
+c = await redCentroid();
+check('反轉 X：+x 朝左', c.dx < -10, `dx=${c.dx.toFixed(1)}`);
+await p.screenshot({ path: `${OUT}/linear-invx.png` });
 await p.click('#btnInvX');
 await p.waitForTimeout(600);
 c = await redCentroid();
@@ -139,34 +142,58 @@ await p.waitForTimeout(300);
 const fsOff = await p.evaluate(() => window.__test.fs || document.body.classList.contains('fs-test'));
 check('畫布上的「離開」', !fsOff);
 
-// 9) 切回向心分解，版面恢復
-await p.click('#subCentri');
-const vis2 = await p.evaluate(() => Object.fromEntries(
-  ['readouts', 'readoutsLinear', 'controlsLinear', 'controlsOpts', 'btnCalib', 'legendMain']
-    .map((id) => [id, getComputedStyle(document.getElementById(id)).display !== 'none'])));
-check('切回向心分解', vis2.readouts && !vis2.readoutsLinear && !vis2.controlsLinear && vis2.controlsOpts
-  && vis2.btnCalib && vis2.legendMain, JSON.stringify(vis2));
+// 9) 向心分解已停用：子分頁只剩「向心力」
+const subs = await p.evaluate(() => [...document.querySelectorAll('#screenTabs .tab')].map((t) => t.textContent));
+check('子分頁只剩向心力', subs.length === 1 && subs[0] === '向心力', JSON.stringify(subs));
 
 // 10) 其他分頁看不到子分頁
 await p.click('#tabBird');
 const subHidden = await p.evaluate(() => getComputedStyle(document.getElementById('screenTabs')).display === 'none');
 check('其他分頁隱藏子分頁', subHidden);
 
-// 11) 重新載入後記得模式
+// 11) 重新載入後一律是向心力模式
 await p.click('#tabScreen');
-await p.click('#subLinear');
 await p.reload({ waitUntil: 'networkidle' });
-const remembered = await p.evaluate(() => window.__state.screenMode);
-check('記住螢幕視角模式', remembered === 'linear', remembered);
+const mode = await p.evaluate(() => window.__state.screenMode);
+check('預設向心力模式', mode === 'linear', mode);
 
-// 12) 示範模式在平面加速度下：箭頭應大致朝向模擬的圓心（28° 偏離 +y，X 反轉後鏡像）
-await p.click('#btnInvX');   // 關掉預設的 X 反轉，才會和向心分解同向
+// 12) 示範模式：箭頭應朝向模擬的圓心（偏離 +y 28°）
 await p.click('#btnDemo');
 await p.waitForTimeout(15000);
 const dm = await p.evaluate(() => ({ ax: window.__linear.ax, ay: window.__linear.ay }));
 const ang = Math.atan2(dm.ax, dm.ay) * 180 / Math.PI;   // 相對 +y 的角度，模擬值為 28°
 check('示範模式方向', Math.abs(ang - 28) < 12, `相對 +y ${ang.toFixed(1)}°`);
 await p.screenshot({ path: `${OUT}/linear-demo.png`, fullPage: true });
+
+// 13) 平台判定：iPhone 預設 X、Y 都反轉，Android 都不反轉
+const UA = {
+  iPhone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+  Android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36',
+};
+for (const [name, ua, want] of [['iPhone', UA.iPhone, true], ['Android', UA.Android, false]]) {
+  const ctx = await b.newContext({ userAgent: ua, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const q = await ctx.newPage();
+  q.on('pageerror', (e) => errs.push(`${name} pageerror: ` + e.message));
+  await q.goto('http://127.0.0.1:8126/index.html', { waitUntil: 'networkidle' });
+  const st = await q.evaluate(() => ({
+    x: window.__linear.invertX, y: window.__linear.invertY,
+    bx: document.getElementById('btnInvX').classList.contains('on'),
+    by: document.getElementById('btnInvY').classList.contains('on'),
+    foot: document.getElementById('sensorInfo').textContent,
+  }));
+  check(`${name} 預設${want ? '兩軸都反轉' : '都不反轉'}`,
+    st.x === want && st.y === want && st.bx === want && st.by === want, JSON.stringify(st));
+
+  // 14) 手機橫放 → 蓋上「請轉回直向」
+  await q.setViewportSize({ width: 844, height: 390 });
+  await q.waitForTimeout(200);
+  const hint = await q.evaluate(() => getComputedStyle(document.querySelector('.rotate-hint')).display);
+  await q.setViewportSize({ width: 390, height: 844 });
+  await q.waitForTimeout(200);
+  const hint2 = await q.evaluate(() => getComputedStyle(document.querySelector('.rotate-hint')).display);
+  check(`${name} 橫放提示`, hint !== 'none' && hint2 === 'none', `橫 ${hint} / 直 ${hint2}`);
+  await ctx.close();
+}
 
 console.log(errs.length ? 'ERRORS:\n' + errs.join('\n') : '沒有 JS 錯誤');
 const fail = results.filter(([ok]) => !ok).length;

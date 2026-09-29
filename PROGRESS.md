@@ -2,7 +2,7 @@
 
 更新時間：2026-09-21
 存檔版本：v1
-程式版本：**v10**（`src/app.js` 的 `BUILD` 與 `sw.js` 的 `VERSION`）
+程式版本：**v11**（`src/app.js` 的 `BUILD` 與 `sw.js` 的 `VERSION`）
 
 ---
 
@@ -74,7 +74,19 @@ README.md               158 行  完整原理說明
 4. **座標測試** — 整個畫面的原始像素座標，原點左上角。十字鍵 + 點擊定位 +
    全螢幕按鈕。同時顯示原始像素 / 裝置像素 / 裝置座標三組。
 
-### 螢幕視角的第二個模式：平面加速度（v10 新增）
+### v11 變更（使用者要求）
+
+- **向心分解已停用（註解掉，程式碼保留）**：螢幕視角只剩一個子分頁，**改名「向心力」**
+  （就是 v10 的平面加速度模式）。恢復方法：拿掉 `index.html` 裡 `subCentri` 的 HTML 註解，
+  `state.screenMode` 預設改回 `'centri'`，打開 app.js 裡兩段被註解的程式（點擊監聽與 localStorage 讀取）
+- 校正鈕只剩在鳥瞰 / 原始向量分頁看得到；`test-demo.mjs`、`test-calib.mjs` 已改成先切到鳥瞰視角
+- **平台判定** `detectPlatform()`（UA；iPadOS 用 `maxTouchPoints` 補判）：
+  **iOS 預設 X、Y 都反轉，Android 與其他平台預設都不反轉**。頁尾與畫布左上角顯示平台
+- **固定直向**：manifest 原本就有 `portrait`（只對已安裝 PWA 有效）；另外在開始測量、
+  示範、進全螢幕、載入時呼叫 `screen.orientation.lock('portrait')`（Android 全螢幕 / PWA 才有效）；
+  iOS 不支援 lock，所以手機橫放時用 CSS 蓋一層「請轉回直向」（`.rotate-hint`，限觸控且高度 ≤ 540px）
+
+### 螢幕視角的第二個模式：平面加速度（v10 新增，v11 改名「向心力」）
 
 螢幕視角底下多了一排子分頁「向心分解 / 平面加速度」（存在 localStorage 的 `screenMode`）。
 平面加速度是**把使用者貼來的外部程式（Tailwind + Chart.js + lucide 那份）的功能
@@ -85,9 +97,8 @@ README.md               158 行  完整原理說明
 - 紅色粗箭頭固定比例 1 m/s² = 22 px；尖端有數值標籤
 - 讀數：X / Y / |a| / θ / 歷史最大；波形圖為最近 100 筆 X（藍）Y（金）
 - 按鈕：靜止歸零、重設最大值、反轉 X、反轉 Y、全螢幕（與座標測試共用 `toggleFullscreen`）
-- **X 軸預設反轉**——沿用原程式的預設，不是我們的判斷。依規範 +x 就是螢幕右，
-  示範模式下預設反轉會讓箭頭左右鏡像。要不要改預設待使用者決定
-- 除錯掛鉤 `__linear`；驗證腳本 `tools/tests/test-linear.mjs`（16 項）
+- 反轉預設依平台決定（見 v11 變更）
+- 除錯掛鉤 `__linear`；驗證腳本 `tools/tests/test-linear.mjs`（21 項，含 iPhone / Android UA 與橫放提示）
 
 ### 核心功能
 

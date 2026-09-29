@@ -67,6 +67,8 @@ async function run(cfg, doCalib) {
   const p = await b.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
   p.on('pageerror', (e) => errs.push('pageerror: ' + e.message));
   await p.goto('http://127.0.0.1:8126/index.html', { waitUntil: 'networkidle' });
+  // 螢幕視角現在是向心力模式、沒有校正鈕；校正改從鳥瞰視角進
+  await p.click('#tabBird');
   await p.click('#btnStart');
   await inject(p, cfg);
   if (doCalib) {
