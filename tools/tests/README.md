@@ -37,7 +37,7 @@ npx http-server -p 8126 -c-1 /path/to/compass
 | `test-coord.mjs` | 座標測試頁 | 點畫面回報值 = 實際繪製位置 |
 | `test-origin.mjs` | 原點記號在左上角 | 直角記號的像素集中在左上 |
 | `test-raw.mjs` | 原始向量診斷頁 | 洩漏 RMS = g·sinθ |
-| `test-linear.mjs` | 螢幕視角 → 向心力模式 | 注入 +x/+y 掃紅箭頭像素；反轉、歸零、死區、全螢幕；iOS/Android 預設反轉；橫放提示 |
+| `test-linear.mjs` | 螢幕視角 → 向心力模式 | 注入 +x/+y 掃紅箭頭像素；反轉、歸零、死區（小訊號不被鎖 0、方向不被拉到軸上）、靈敏度選單、全螢幕；iOS/Android 預設反轉；橫放提示 |
 | `test-canvas-reset.mjs` | canvas.width 是否重設 transform | 指定同值也會重設成單位矩陣 |
 
 ## ⚠️ 路徑要改

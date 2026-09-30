@@ -130,6 +130,50 @@ await p.waitForTimeout(400);
 r = await read();
 check('死區 0.08', r.ax === '0.00', r.ax);
 
+// 7b) 靈敏度：小訊號不再被鎖在 0，方向不被拉到軸上（v12 修正前：0.25 顯示 0、28° 顯示 0°）
+await p.click('#btnZero');                       // 先清掉上一段的偏移影響
+await p.evaluate(() => { window.__linear.off = { x: 0, y: 0 }; });
+await setVec(0.2, 0);
+await p.waitForTimeout(800);
+r = await read();
+check('小訊號 0.20 有顯示', r.ax === '0.20', `ax=${r.ax}`);
+{
+  const a = 0.3, th = 28 * Math.PI / 180;
+  await setVec(a * Math.sin(th), a * Math.cos(th));
+  await p.waitForTimeout(800);
+  const d = await p.evaluate(() => Math.atan2(window.__linear.ax, window.__linear.ay) * 180 / Math.PI);
+  check('|a|=0.3 方向不被拉到軸上', Math.abs(d - 28) < 1, `偏離 +Y ${d.toFixed(1)}°`);
+}
+await setVec(0.05, 0);
+await p.waitForTimeout(800);
+r = await read();
+check('|a| < 0.08 不畫', r.mag === '0.00', `|a|=${r.mag}`);
+
+// 7c) 箭頭比例：預設 ×4（88 px），×1 時箭頭長度約為 1/4
+await setVec(1, 0);
+await p.waitForTimeout(600);
+// 形心會被尖端的數值標籤（紅框）與中心紅點拉偏，改量最右邊的紅色像素：兩者差應接近 88 − 22 = 66 px
+const reach = () => p.evaluate(() => {
+  const c = document.getElementById('view');
+  const { width: W, height: H } = c;
+  const d = c.getContext('2d').getImageData(0, 0, W, H).data;
+  let mx = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    if (d[i] > 230 && d[i + 1] > 60 && d[i + 1] < 95 && d[i + 2] > 70 && d[i + 2] < 100) mx = Math.max(mx, x);
+  }
+  return (mx - W / 2) / (W / c.getBoundingClientRect().width);
+});
+const r88 = await reach();
+await p.selectOption('#selLinScale', '22');
+await p.waitForTimeout(300);
+const r22 = await reach();
+check('靈敏度選單', Math.abs((r88 - r22) - 66) < 6, `×4 伸到 ${r88.toFixed(1)} px，×1 伸到 ${r22.toFixed(1)} px，差 ${(r88 - r22).toFixed(1)}（應為 66）`);
+await p.selectOption('#selLinScale', '88');
+await setVec(0.6, -0.4);
+await p.evaluate(() => { window.__linear.off = { x: 0.6, y: -0.4 }; });
+await p.waitForTimeout(400);
+
 // 8) 全螢幕：按鈕進入、畫布右上「離開」退出
 await setVec(0.6 + 2, -0.4);
 await p.click('#btnFullLinear');

@@ -26,7 +26,7 @@
 import { COMPASS_BASE_SIZE, renderCompass } from './mc-compass.js';
 
 /** 版本號，顯示在頁尾。改程式時和 sw.js 的 VERSION 一起往上跳。 */
-const BUILD = 'v11';
+const BUILD = 'v12';
 
 const G = 9.80665;
 const DEG = Math.PI / 180;
@@ -142,7 +142,9 @@ const linear = {
   has: null,           // 這支手機有沒有提供 e.acceleration；null = 還不知道
   raw: { x: 0, y: 0 }, // 未處理的讀值，歸零時拿它當基準
   off: { x: 0, y: 0 }, // 歸零偏移
-  ax: 0, ay: 0,        // 低通 + 死區之後的值（裝置座標）
+  fx: 0, fy: 0,        // 低通之後的值（裝置座標），死區不寫回這裡
+  ax: 0, ay: 0,        // 過了死區、實際顯示的值
+  scale: 88,           // 箭頭比例：1 m/s² 畫幾 CSS px
   mag: 0,
   peak: 0,
   // iOS 的正負號和規範相反，兩軸都翻回來；Android 與其他平台照規範
@@ -161,8 +163,12 @@ const LINEAR_HIST = 100;
 const LINEAR_LP = 0.3;
 /** 死區：靜止時的雜訊約 ±0.05 m/s²，低於這個一律當 0，箭頭才不會亂跳。 */
 const LINEAR_DEAD = 0.08;
-/** 箭頭比例：1 m/s² = 22 CSS px。固定不自動縮放，推得越急箭頭就越長。 */
-const LINEAR_PX = 22;
+/**
+ * 箭頭比例的選項（1 m/s² 畫幾 CSS px）。固定比例、不自動縮放，推得越急箭頭就越長。
+ * 原程式是 22，但轉盤的向心加速度常只有 0.2～1 m/s²，22 px 下只剩 4～22 px 幾乎看不到，
+ * 所以預設放大到 88。
+ */
+const LINEAR_SCALES = [22, 44, 88, 176];
 
 /** 每圈平均用的環形緩衝。 */
 const revBuf = { items: [], sumC: 0, sumT: 0, sumW: 0, psi: 0, secs: 0 };
@@ -224,6 +230,7 @@ const els = {
   btnInvX: $('btnInvX'),
   btnInvY: $('btnInvY'),
   btnFullLinear: $('btnFullLinear'),
+  selLinScale: $('selLinScale'),
   rlAx: $('rlAx'),
   rlAy: $('rlAy'),
   rlMag: $('rlMag'),
@@ -612,13 +619,17 @@ function handleLinear(a) {
   if (linear.invertX) x = -x;
   if (linear.invertY) y = -y;
 
-  linear.ax += (x - linear.ax) * LINEAR_LP;
-  linear.ay += (y - linear.ay) * LINEAR_LP;
-  // 死區直接寫回濾波器狀態，靜止時才會真的停在 0，而不是慢慢衰減
-  if (Math.abs(linear.ax) < LINEAR_DEAD) linear.ax = 0;
-  if (Math.abs(linear.ay) < LINEAR_DEAD) linear.ay = 0;
+  linear.fx += (x - linear.fx) * LINEAR_LP;
+  linear.fy += (y - linear.fy) * LINEAR_LP;
 
-  linear.mag = Math.hypot(linear.ax, linear.ay);
+  // 死區只決定「顯示不顯示」，不寫回濾波器。原程式把 0 寫回去，固定訊號從 0 起步時
+  // 第一步只長到 0.3 倍，小於 0.08 / 0.3 ≈ 0.27 m/s² 的訊號會被永遠鎖在 0。
+  // 而且用整個向量的大小判斷，不逐軸砍 —— 逐軸砍會把小的那個分量歸零，方向被拉到軸上。
+  const m = Math.hypot(linear.fx, linear.fy);
+  const on = m >= LINEAR_DEAD;
+  linear.ax = on ? linear.fx : 0;
+  linear.ay = on ? linear.fy : 0;
+  linear.mag = on ? m : 0;
   if (linear.mag > linear.peak) linear.peak = linear.mag;
 
   linear.hist.push({ x: linear.ax, y: linear.ay });
@@ -982,7 +993,7 @@ function drawRawView() {
 /**
  * 平面加速度畫面：手機固定在中央，紅色粗箭頭就是當下的加速度向量。
  *
- * 比例固定 LINEAR_PX，不自動縮放 —— 這個畫面要讓人看出「推得越急箭頭越長」，
+ * 比例由 linear.scale 決定、不自動縮放 —— 這個畫面要讓人看出「推得越急箭頭越長」，
  * 自動量程會把這個感覺抹掉。
  */
 function drawLinearView() {
@@ -1045,10 +1056,12 @@ function drawLinearView() {
   drawAxisGizmo(ctx, 26, h - 44);
 
   // 箭頭。裝置 +y 朝上、canvas +y 朝下，所以 y 取負號
-  if (linear.mag > LINEAR_DEAD) {
+  if (linear.mag > 0) {
     const v = toScreen({ x: linear.ax, y: linear.ay });
-    const tx = cx + v.x * LINEAR_PX;
-    const ty = cy - v.y * LINEAR_PX;
+    // 超出畫面就停在邊緣，實際大小看尖端的數值標籤
+    const len = Math.min(linear.mag * linear.scale, size / 2 - 36);
+    const tx = cx + (v.x / linear.mag) * len;
+    const ty = cy - (v.y / linear.mag) * len;
     arrow(ctx, cx, cy, tx, ty, '#ff4d55', 12);
 
     // 箭頭尖端外側的數值標籤，夾在畫面內才不會跑出去
@@ -1084,7 +1097,7 @@ function drawLinearView() {
   ctx.fillText(`${PLATFORM_NAME}・${flips.length ? `已反轉 ${flips.join('、')} 軸` : '未反轉'}`, 12, 20);
   ctx.fillStyle = '#46506b';
   ctx.textAlign = 'center';
-  ctx.fillText(`紅色粗箭頭：即時加速度方向與強度（手推方向）　1 m/s² = ${LINEAR_PX} px`,
+  ctx.fillText(`紅色粗箭頭：即時加速度方向與強度（手推方向）　1 m/s² = ${linear.scale} px`,
     cx, h - 12);
   ctx.restore();
 
@@ -1863,7 +1876,7 @@ function updateReadouts() {
     els.rlAx.textContent = fmt(linear.ax);
     els.rlAy.textContent = fmt(linear.ay);
     els.rlMag.textContent = fmt(linear.mag);
-    els.rlAngle.textContent = linear.mag > LINEAR_DEAD ? fmt(deg, 1) : '0.0';
+    els.rlAngle.textContent = linear.mag > 0 ? fmt(deg, 1) : '0.0';
     els.rlPeak.textContent = fmt(linear.peak);
   }
 
@@ -2091,11 +2104,21 @@ els.btnOrigin.addEventListener('click', () => testSetPos(0, 0));
 els.btnZero.addEventListener('click', () => {
   linear.off = { ...linear.raw };
   // 濾波器裡還留著歸零前的值，一起清掉，箭頭才會立刻回到 0
-  linear.ax = linear.ay = linear.mag = 0;
+  linear.fx = linear.fy = linear.ax = linear.ay = linear.mag = 0;
   linearNote('歸零完成：已將目前的讀值設為 0 m/s² 基準點');
 });
 
 els.btnPeak.addEventListener('click', () => { linear.peak = 0; });
+
+els.selLinScale.addEventListener('change', (e) => {
+  linear.scale = +e.target.value;
+  try { localStorage.setItem('linearScale', e.target.value); } catch { /* 無痕模式會丟錯 */ }
+});
+try {
+  const saved = +localStorage.getItem('linearScale');
+  if (LINEAR_SCALES.includes(saved)) linear.scale = saved;
+} catch { /* 略 */ }
+els.selLinScale.value = String(linear.scale);
 
 function syncInvertButtons() {
   els.btnInvX.classList.toggle('on', linear.invertX);

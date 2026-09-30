@@ -106,6 +106,15 @@
     <button id="btnInvX" class="btn" aria-pressed="true">反轉 X 軸（左右）</button>
     <button id="btnInvY" class="btn" aria-pressed="false">反轉 Y 軸（前後）</button>
     <button id="btnFullLinear" class="btn">全螢幕</button>
+    <label class="field">
+      <span>箭頭靈敏度</span>
+      <select id="selLinScale">
+        <option value="22">×1（1 m/s² = 22 px，原程式）</option>
+        <option value="44">×2（1 m/s² = 44 px）</option>
+        <option value="88" selected>×4（1 m/s² = 88 px）</option>
+        <option value="176">×8（1 m/s² = 176 px）</option>
+      </select>
+    </label>
   </section>
 
   <section class="controls hidden" id="controlsTest">
@@ -153,11 +162,11 @@
     <h3>向心力（螢幕視角）</h3>
     <p>把手機<strong>螢幕朝上平放</strong>（在轉盤上，或直接在水平桌面上推動手機）：</p>
     <ul>
-      <li><span class="red-t">紅色粗箭頭</span>指向手機當下的加速度方向（左右與前後都有），長度正比於大小，<strong>推得越急箭頭越長</strong>。比例固定為 1 m/s² = 22 px。</li>
+      <li><span class="red-t">紅色粗箭頭</span>指向手機當下的加速度方向（左右與前後都有），長度正比於大小，<strong>推得越急箭頭越長</strong>。比例由「箭頭靈敏度」選擇，預設 1 m/s² = 88 px（原程式是 22 px）；超出畫面時箭頭停在邊緣，實際大小看尖端的數值。</li>
       <li>讀數給 X / Y 分量、合加速度 |a|、方向角 θ（0° = +X 右，90° = +Y 前）與歷史最大值；下方波形圖是最近 100 筆的 X / Y。</li>
       <li><strong>靜止歸零</strong>：手機放著不動時按一下，把目前讀值設成 0 的基準點。</li>
       <li><strong>反轉 X / Y 軸</strong>：箭頭方向相反時用。程式會自動判斷手機平台：<strong>iOS 預設 X、Y 都反轉</strong>（iOS 的感測器正負號和規範相反），<strong>Android 預設都不反轉</strong>。頁尾會顯示判斷出的平台。</li>
-      <li>小於 0.08 m/s² 的讀值一律當成 0，避免靜止時箭頭亂跳。</li>
+      <li>合加速度 |a| 小於 0.08 m/s² 時不畫箭頭，避免靜止時亂跳。這個門檻只影響顯示，不會把小訊號吃掉。</li>
     </ul>
     <p>向量小知識：根據牛頓第二定律 <strong>F = m·a</strong>，加速度箭頭的方向就是手施加給手機的合力方向。</p>
     <p>這個模式讀的是 <code>e.acceleration</code>（系統已經扣掉重力的加速度），和向心分解讀的 <code>accelerationIncludingGravity</code> 不同，不需要校正，也不受桌面傾斜影響。少數手機不提供這個值，狀態列會提示。</p>
